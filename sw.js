@@ -1,11 +1,13 @@
-// Offline cache for the app shell. Bump VERSION whenever any file changes
-// so installed phones pick up the new files on next launch.
-const VERSION = 'aone-v1.0.0';
+// Offline cache for the app shell and the Firebase SDK. Bump VERSION
+// whenever any file changes so installed phones pick up the new files.
+const VERSION = 'aone-v2.0.0';
+const FIREBASE = 'https://www.gstatic.com/firebasejs/12.19.0/';
 const ASSETS = [
   './',
   './index.html',
   './css/app.css',
   './js/app.js',
+  './js/cloud.js',
   './js/db.js',
   './js/voice.js',
   './js/scale.js',
@@ -14,6 +16,9 @@ const ASSETS = [
   './icons/icon-512.png',
   './icons/maskable-512.png',
   './icons/apple-touch-icon.png',
+  FIREBASE + 'firebase-app.js',
+  FIREBASE + 'firebase-auth.js',
+  FIREBASE + 'firebase-firestore.js',
 ];
 
 self.addEventListener('install', e => {
@@ -28,9 +33,14 @@ self.addEventListener('activate', e => {
   );
 });
 
+// Only the app's own files and the Firebase SDK are cached. Firestore and
+// sign-in traffic always goes to the network (Firestore has its own offline copy).
 self.addEventListener('fetch', e => {
   const req = e.request;
-  if (req.method !== 'GET' || new URL(req.url).origin !== location.origin) return;
+  if (req.method !== 'GET') return;
+  const sameOrigin = new URL(req.url).origin === location.origin;
+  if (!sameOrigin && !req.url.startsWith(FIREBASE)) return;
+  if (sameOrigin && new URL(req.url).pathname.includes('/__/')) return;
   if (req.mode === 'navigate') {
     e.respondWith(caches.match('./index.html').then(r => r || fetch(req)));
     return;

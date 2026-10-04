@@ -272,6 +272,13 @@ textarea.input { resize: vertical; }
 .card h2 { margin: 0; font-size: 18px; }
 .card p { margin: 0; }
 .ver { text-align: center; color: var(--muted); font-size: 14px; }
+.card.note { border-color: var(--brand-2); background: #eef5fc; }
+.card h2 small { font-weight: 600; }
+.sync-badge { display: inline-block; margin-top: 10px; padding: 4px 12px; border-radius: 999px; font-size: 13px; font-weight: 800; background: rgba(255,255,255,.16); color: #fff; }
+.sync-badge.wait { background: #f59e0b; color: #1f1300; }
+.sync-badge.off { background: #fde68a; color: #422006; }
+.card .sync-badge { margin-top: 0; background: #dcfce7; color: #14532d; }
+.card .sync-badge.wait, .card .sync-badge.off { background: #fef3c7; color: #422006; }
 .boot { display: grid; place-items: center; min-height: 60vh; color: var(--muted); text-align: center; padding: 16px; }
 
 /* ---------- receipt ---------- */

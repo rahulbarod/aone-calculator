@@ -1,0 +1,20 @@
+rules_version = '2';
+
+// Only these Google accounts can read or change the shop's data.
+// To add or remove a phone's account, edit this list and click Publish
+// in Firebase console → Firestore Database → Rules.
+service cloud.firestore {
+  match /databases/{database}/documents {
+    function allowed() {
+      return request.auth != null
+        && request.auth.token.email_verified == true
+        && request.auth.token.email.lower() in [
+          'rahulbarod046@gmail.com',
+          'FATHER_EMAIL@gmail.com'
+        ];
+    }
+    match /{document=**} {
+      allow read, write: if allowed();
+    }
+  }
+}

@@ -1,8 +1,9 @@
-import { db } from './db.js';
+import { cloud } from './cloud.js';
+import { db as legacyDb } from './db.js';
 import { voice } from './voice.js';
 import { scale } from './scale.js';
 
-const APP_VERSION = '1.0.0';
+const APP_VERSION = '2.0.0';
 
 // ---------------------------------------------------------------- constants
 const UNITS = {
@@ -28,10 +29,9 @@ const VOICE_LANGS = {
   'en-IN': 'English (India)', 'hi-IN': 'Hindi', 'mr-IN': 'Marathi', 'gu-IN': 'Gujarati',
   'pa-IN': 'Punjabi', 'bn-IN': 'Bengali', 'ta-IN': 'Tamil', 'te-IN': 'Telugu', 'kn-IN': 'Kannada',
 };
-const DEFAULT_SETTINGS = {
-  shopName: 'A ONE ENTERPRISE', shopAddress: '', shopPhone: '',
-  voiceLang: 'en-IN', showTodaySales: true, nextBillNo: 1, lastBackupAt: null, seeded: false,
-};
+// Shared by both phones (stored in the cloud).
+const DEFAULT_SHOP = { shopName: 'A ONE ENTERPRISE', shopAddress: '', shopPhone: '', showTodaySales: true };
+const RECENT_DAYS = 45; // bills older than this load on demand in History
 
 // Starting catalogue. Prices other than those in the brief are placeholders.
 const SAMPLE_PRODUCTS = [
@@ -54,8 +54,32 @@ const SAMPLE_PRODUCTS = [
 ];
 
 // ---------------------------------------------------------------- state
-const S = { products: [], customers: [], bills: [], settings: { ...DEFAULT_SETTINGS } };
-window.AOne = { S, db, scale }; // handy for debugging in DevTools
+const S = {
+  user: undefined, // undefined = still checking, null = signed out
+  denied: false,
+  products: [], customers: [], bills: [], olderBills: [],
+  shop: { ...DEFAULT_SHOP }, counters: {},
+  loaded: {}, fromServer: {}, pending: {},
+  legacy: null, // data saved on this phone by v1 (before sync)
+};
+window.AOne = { S, cloud, scale }; // handy for debugging in DevTools
+
+// Per-phone preferences (not synced).
+const local = {
+  get(key, def = null) {
+    try {
+      const v = localStorage.getItem('aone.' + key);
+      return v == null ? def : JSON.parse(v);
+    } catch {
+      return def;
+    }
+  },
+  set(key, value) {
+    try {
+      localStorage.setItem('aone.' + key, JSON.stringify(value));
+    } catch { /* private mode */ }
+  },
+};
 
 // ---------------------------------------------------------------- helpers
 const $ = (sel, root = document) => root.querySelector(sel);
@@ -67,6 +91,7 @@ const round2 = n => Math.sign(n) * Math.round(Math.abs(n) * 100 + 1e-9) / 100;
 const round3 = n => Math.sign(n) * Math.round(Math.abs(n) * 1000 + 1e-9) / 1000;
 const num = v => parseFloat(String(v ?? '').replace(/,/g, '.').replace(/[^0-9.\-]/g, ''));
 const plural = (n, w) => `${n} ${w}${n === 1 ? '' : 's'}`;
+const recentCutoff = () => new Date(Date.now() - RECENT_DAYS * 864e5).toISOString();
 
 function money(n) {
   const frac = Math.abs(n) % 1 > 0.0001;
@@ -111,34 +136,16 @@ function toast(msg, kind = '') {
   toastTimer = setTimeout(() => (t.hidden = true), kind === 'err' ? 4000 : 2000);
 }
 
-async function persist(store, obj) {
-  try {
-    await db.put(store, obj);
-  } catch (e) {
-    console.error(e);
-    toast('⚠ Could not save: ' + e.message, 'err');
-  }
-}
-async function remove(store, key) {
-  try {
-    await db.del(store, key);
-  } catch (e) {
-    toast('⚠ Could not delete: ' + e.message, 'err');
-  }
-}
-async function setSetting(key, value) {
-  S.settings[key] = value;
-  await persist('settings', { key, value });
-}
-
 // ---------------------------------------------------------------- lookups
-const getBill = id => S.bills.find(b => b.id === id);
+const allBills = () => [...S.bills, ...S.olderBills.filter(o => !S.bills.some(b => b.id === o.id))];
+const getBill = id => allBills().find(b => b.id === id);
 const getProduct = id => S.products.find(p => p.id === id);
 const getCustomer = id => S.customers.find(c => c.id === id);
 const activeBills = () => S.bills
   .filter(b => b.status === 'ACTIVE' || b.status === 'DRAFT')
   .sort((a, b) => a.createdAt.localeCompare(b.createdAt));
-const billName = b => b.customerName || (b.customerChosen ? `Walk-in #${b.billNo}` : `New bill #${b.billNo}`);
+const billLabel = b => `#${b.device ? b.device + '-' : ''}${b.billNo}`;
+const billName = b => b.customerName || (b.customerChosen ? `Walk-in ${billLabel(b)}` : `New bill ${billLabel(b)}`);
 
 function searchCustomers(q) {
   const s = q.trim().toLowerCase();
@@ -169,41 +176,156 @@ function makeProduct(f) {
     createdAt: now(), updatedAt: now(),
   };
 }
+function sampleToProduct([name, category, unit, price, favourite, stock]) {
+  return makeProduct({ name, category, unit, price, favourite, stock, minStock: stock != null ? 10 : null });
+}
 
-function recalc(b) {
-  b.subtotal = round2(b.items.reduce((s, i) => s + i.amount, 0));
-  b.total = b.subtotal; // room for discount / GST later
-  b.updatedAt = now();
-}
-async function saveBill(b) {
-  recalc(b);
-  if (!S.bills.includes(b)) S.bills.push(b);
-  await persist('bills', b);
-}
-async function deleteBill(b) {
-  S.bills = S.bills.filter(x => x !== b);
-  await remove('bills', b.id);
-}
-async function createBill() {
-  const no = S.settings.nextBillNo || 1;
-  await setSetting('nextBillNo', no + 1);
-  const b = {
-    id: uid(), billNo: no, status: 'DRAFT', customerChosen: false,
-    customerId: null, customerName: '', customerPhone: '', customerType: null,
-    items: [], subtotal: 0, total: 0, createdAt: now(), updatedAt: now(), completedAt: null,
-  };
-  await saveBill(b);
+// Bills are stored with items as a map (see cloud.js); the app uses an array.
+function billFromDoc(d) {
+  const items = Array.isArray(d.items) ? d.items : Object.values(d.items || {});
+  const b = { ...d, items: items.sort((x, y) => (x.addedAt || '').localeCompare(y.addedAt || '')) };
+  recalc(b, false);
   return b;
 }
-// Bills opened with "Add to bill" and abandoned before choosing anyone.
+function billToDoc(b) {
+  return { ...b, items: Object.fromEntries(b.items.map(i => [i.id, i])) };
+}
+function recalc(b, touch = true) {
+  b.subtotal = round2(b.items.reduce((s, i) => s + i.amount, 0));
+  b.total = b.subtotal; // room for discount / GST later
+  if (touch) b.updatedAt = now();
+}
+const totalsOf = b => {
+  recalc(b);
+  return { subtotal: b.subtotal, total: b.total, updatedAt: b.updatedAt };
+};
+function updateBill(b, fields) {
+  Object.assign(b, fields);
+  cloud.update('bills', b.id, { ...fields, ...totalsOf(b) });
+}
+function putBillItem(b, item, fields = {}) {
+  const i = b.items.findIndex(x => x.id === item.id);
+  if (i >= 0) b.items[i] = item;
+  else b.items.push(item);
+  Object.assign(b, fields);
+  cloud.setBillItem(b.id, item, { ...fields, ...totalsOf(b) });
+}
+function dropBillItem(b, itemId) {
+  b.items = b.items.filter(i => i.id !== itemId);
+  cloud.removeBillItem(b.id, itemId, totalsOf(b));
+}
+function deleteBill(b) {
+  S.bills = S.bills.filter(x => x.id !== b.id);
+  cloud.remove('bills', b.id);
+}
+
+// Each phone numbers its own bills (R-1, R-2… / P-1, P-2…) so two phones
+// working offline never hand out the same number.
+function deviceCode() {
+  let code = local.get('deviceCode');
+  if (!code) {
+    const first = ((S.user?.displayName || S.user?.email || 'A').match(/[a-z]/i)?.[0] || 'A').toUpperCase();
+    code = first;
+    for (let i = 0; S.counters[code] != null && i < 26; i++) code = String.fromCharCode(65 + ((first.charCodeAt(0) - 65 + i + 1) % 26));
+    local.set('deviceCode', code);
+  }
+  return code;
+}
+function createBill() {
+  const dev = deviceCode();
+  const seen = allBills().filter(b => b.device === dev).map(b => b.billNo || 0);
+  const no = Math.max(local.get('counter.' + dev, 0), S.counters[dev] || 0, ...seen) + 1;
+  local.set('counter.' + dev, no);
+  cloud.setMeta('counters', { [dev]: no });
+  const b = {
+    id: uid(), billNo: no, device: dev, status: 'DRAFT', customerChosen: false,
+    customerId: null, customerName: '', customerPhone: '', customerType: null,
+    items: [], subtotal: 0, total: 0, createdAt: now(), updatedAt: now(), completedAt: null,
+    createdBy: S.user.email,
+  };
+  S.bills.push(b);
+  cloud.put('bills', billToDoc(b));
+  return b;
+}
+// Bills this phone opened with "Add to bill" and abandoned before choosing anyone.
 function purgeEmptyDrafts() {
-  for (const b of S.bills.filter(b => b.status === 'DRAFT' && !b.customerChosen && !b.items.length)) deleteBill(b);
+  const mine = b => b.device === local.get('deviceCode') && b.createdBy === S.user.email;
+  for (const b of S.bills.filter(b => b.status === 'DRAFT' && !b.customerChosen && !b.items.length && mine(b))) deleteBill(b);
 }
 function todayStats() {
-  const t = new Date().toISOString();
+  const t = now();
   const done = S.bills.filter(b => b.status === 'COMPLETED' && b.completedAt && sameDay(b.completedAt, t));
   return { count: done.length, total: round2(done.reduce((s, b) => s + b.total, 0)) };
 }
+function saveCustomer(f, existing = null) {
+  const c = existing ? { ...existing } : { id: uid(), createdAt: now(), lastBilledAt: null };
+  Object.assign(c, { name: f.name, phone: f.phone || '', address: f.address || '', notes: f.notes || '', type: f.type || 'REGULAR', updatedAt: now() });
+  S.customers = S.customers.filter(x => x.id !== c.id).concat(c);
+  cloud.put('customers', c);
+  return c;
+}
+function adjustStock(bill) {
+  for (const it of bill.items) {
+    const p = getProduct(it.productId);
+    if (p && typeof p.stock === 'number' && p.unit === it.unit) {
+      const delta = it.rate < 0 ? it.quantity : -it.quantity; // scrap comes in, sales go out
+      p.stock = round3(p.stock + delta);
+      cloud.addStock(p.id, delta, now());
+    }
+  }
+}
+
+// ---------------------------------------------------------------- live data
+let unsubscribe = null;
+
+function onData(name, rows, meta) {
+  if (name === 'products') S.products = rows;
+  else if (name === 'customers') S.customers = rows;
+  else if (name === 'bills') S.bills = rows.map(billFromDoc);
+  else if (name === 'meta') {
+    const { id, ...shop } = rows.find(r => r.id === 'shop') || {};
+    S.shop = { ...DEFAULT_SHOP, ...shop };
+    const { id: _, ...counters } = rows.find(r => r.id === 'counters') || {};
+    S.counters = counters;
+  }
+  const first = !S.loaded[name];
+  S.loaded[name] = true;
+  if (!meta.fromCache) S.fromServer[name] = true;
+  S.pending[name] = meta.pending;
+  updateSyncBadge();
+  if (meta.dataChanged || first) scheduleRender();
+}
+
+function syncState() {
+  if (!navigator.onLine) return { cls: 'off', text: '📴 Offline — saved on phone, will sync' };
+  if (Object.values(S.pending).some(Boolean)) return { cls: 'wait', text: '⏳ Syncing…' };
+  return { cls: 'ok', text: '☁ Synced' };
+}
+function updateSyncBadge() {
+  const s = syncState();
+  document.querySelectorAll('.sync-badge').forEach(el => {
+    el.className = 'sync-badge ' + s.cls;
+    el.textContent = s.text;
+  });
+}
+window.addEventListener('online', updateSyncBadge);
+window.addEventListener('offline', updateSyncBadge);
+
+// Changes from the other phone re-render the screen, but never while you are
+// typing or have a popup open — that update waits until you finish.
+let renderPending = false;
+const uiBusy = () => !$('#sheet').hidden || !$('#modal').hidden || ['INPUT', 'TEXTAREA', 'SELECT'].includes(document.activeElement?.tagName);
+function scheduleRender() {
+  if (uiBusy()) renderPending = true;
+  else render(true);
+}
+function flushRender() {
+  if (renderPending && !uiBusy()) {
+    renderPending = false;
+    render(true);
+  }
+}
+document.addEventListener('focusout', () => setTimeout(flushRender, 60));
 
 // ---------------------------------------------------------------- routing
 let R = { a: '', b: '', c: '' };
@@ -217,13 +339,18 @@ function go(path, replace = false) {
 
 function render(keepScroll = false) {
   const y = window.scrollY;
-  closeSheet();
+  renderPending = false;
+  closeSheet(true);
   const [a = '', b = '', c = ''] = location.hash.replace(/^#\/?/, '').split('/');
   R = { a, b, c };
-  const html = route(a, b, c);
+  const html = S.user === undefined ? '<div class="boot">Loading…</div>'
+    : !S.user ? viewLogin()
+    : S.denied ? viewDenied()
+    : route(a, b, c);
   if (html == null) return; // redirected
   app.innerHTML = html;
   window.scrollTo(0, keepScroll ? y : 0);
+  updateSyncBadge();
   if (a === 'settings') fillStorageInfo();
 }
 
@@ -233,7 +360,10 @@ function route(a, b, c) {
     case 'bills': return viewActiveBills();
     case 'bill': {
       const bill = getBill(b);
-      if (!bill || bill.status === 'COMPLETED' || bill.status === 'CANCELLED') return go('/', true);
+      if (!bill || bill.status === 'COMPLETED' || bill.status === 'CANCELLED') {
+        if (!bill && !S.loaded.bills) return '<div class="boot">Loading…</div>';
+        return go('/', true);
+      }
       if (c === 'customer') return viewCustomerPick(bill);
       if (!bill.customerChosen) return go(`/bill/${b}/customer`, true);
       if (c === 'add') return viewAddItem(bill);
@@ -242,6 +372,7 @@ function route(a, b, c) {
     case 'done':
     case 'receipt': {
       const bill = getBill(b);
+      if (!bill && !S.loaded.bills) return '<div class="boot">Loading…</div>';
       return bill ? viewReceipt(bill, a === 'done' ? '/' : '/history') : go('/history', true);
     }
     case 'history': return viewHistory();
@@ -263,22 +394,51 @@ const micBtn = target => `<button type="button" class="mic" data-act="mic" data-
 function billCard(b) {
   return `<button class="bill-card" data-act="openBill" data-id="${b.id}">
     <span class="dot ${b.items.length ? 'on' : ''}"></span>
-    <span class="bc-name"><b>${esc(billName(b))}</b><small>${plural(b.items.length, 'item')} · #${b.billNo} · ${fmtTime(b.createdAt)}</small></span>
+    <span class="bc-name"><b>${esc(billName(b))}</b><small>${plural(b.items.length, 'item')} · ${billLabel(b)} · ${fmtTime(b.createdAt)}</small></span>
     <span class="bc-total ${b.total < 0 ? 'neg-text' : ''}">${money(b.total)}</span>
   </button>`;
 }
 
-// ---------------------------------------------------------------- views
+// ---------------------------------------------------------------- views: sign-in
+function viewLogin() {
+  return `<header class="home-head"><div class="brand">A ONE ENTERPRISE</div><div class="today"><span>BILLING</span></div></header>
+  <main class="page">
+    <div class="card">
+      <h2>Sign in to start</h2>
+      <p>Products, customers and bills are shared live between the shop's phones. Sign in once with your Google account.</p>
+      <button class="btn-big go" data-act="signIn">Sign in with Google</button>
+      <p class="hint">${navigator.onLine ? 'After signing in once, the app also works without internet.' : '📴 You are offline. Connect to the internet once to sign in.'}</p>
+    </div>
+    ${cloud.emulator ? `<div class="card"><h2>Test sign-in (emulator)</h2>
+      <input id="emuEmail" class="input big" placeholder="test@example.com" autocomplete="off">
+      <button class="btn-mid" data-act="emuSignIn">Test sign-in</button></div>` : ''}
+  </main>`;
+}
+function viewDenied() {
+  return `${topbar('Not allowed', null)}
+  <main class="page">
+    <div class="card">
+      <h2>This account can't open the shop's data</h2>
+      <p>Signed in as <b>${esc(S.user.email)}</b>.</p>
+      <p class="hint">Only the Google accounts listed in the Firebase security rules can use this app. Sign out and use the right account, or ask the owner to add this one.</p>
+      <button class="btn-big" data-act="signOut">Sign out</button>
+    </div>
+  </main>`;
+}
+
+// ---------------------------------------------------------------- views: home & bills
 function viewHome() {
   purgeEmptyDrafts();
   const act = activeBills();
   const t = todayStats();
   return `
   <header class="home-head">
-    <div class="brand">${esc(S.settings.shopName)}</div>
-    ${S.settings.showTodaySales ? `<div class="today"><span>₹ TODAY'S SALES</span><b>${money(t.total)}</b><small>${plural(t.count, 'bill')} completed</small></div>` : ''}
+    <div class="brand">${esc(S.shop.shopName)}</div>
+    ${S.shop.showTodaySales ? `<div class="today"><span>₹ TODAY'S SALES</span><b>${money(t.total)}</b><small>${plural(t.count, 'bill')} completed</small></div>` : ''}
+    <a class="sync-badge" href="#/settings"></a>
   </header>
   <main class="page">
+    ${setupCard()}
     <button class="btn-hero" data-act="newBill"><span>＋</span>ADD TO BILL</button>
     <a class="sec-head" href="#/bills"><span>ACTIVE BILLS${act.length ? `<i class="count">${act.length}</i>` : ''}</span><span class="more">All ›</span></a>
     ${act.length ? `<div class="list">${act.slice(0, 6).map(billCard).join('')}</div>` : '<p class="empty">No open bills right now</p>'}
@@ -290,6 +450,24 @@ function viewHome() {
       <a class="tile" href="#/settings"><span class="ti">⚙️</span>SETTINGS</a>
     </nav>
   </main>`;
+}
+// First-run help: move this phone's pre-sync data up, or start a catalogue.
+function setupCard() {
+  const L = S.legacy;
+  if (L && !local.get('migrated')) {
+    return `<div class="card note">
+      <h2>Move this phone's data to the cloud</h2>
+      <p>Saved on this phone before sync: ${plural(L.products.length, 'product')}, ${plural(L.customers.length, 'customer')}, ${plural(L.bills.length, 'bill')}.</p>
+      <p class="hint">Products and customers already in the cloud (same name) are skipped.</p>
+      <div class="btn-row"><button class="btn-mid" data-act="dismissMigrate">Not now</button><button class="btn-mid go" data-act="migrate">UPLOAD</button></div>
+    </div>`;
+  }
+  if (S.fromServer.products && !S.products.length) {
+    return `<div class="card note"><h2>No products yet</h2>
+      <p>Start with the sample list (copper, bearings, scrap…) and edit prices, or add your own under Products.</p>
+      <button class="btn-mid go" data-act="loadSamples">ADD SAMPLE PRODUCTS</button></div>`;
+  }
+  return '';
 }
 
 function viewActiveBills() {
@@ -305,7 +483,7 @@ function viewActiveBills() {
 // --- customer selection for a bill
 function viewCustomerPick(bill) {
   const back = bill.customerChosen || bill.items.length ? `/bill/${bill.id}` : '/';
-  return `${topbar(`Bill #${bill.billNo} · Customer`, back)}
+  return `${topbar(`Bill ${billLabel(bill)} · Customer`, back)}
   <main class="page">
     <div class="search-row">
       <input id="custSearch" class="input big" type="search" placeholder="Type or 🎤 speak name" autocomplete="off" enterkeyhint="search">
@@ -371,7 +549,7 @@ function viewBill(bill) {
   const neg = round2(bill.items.filter(i => i.amount < 0).reduce((s, i) => s + i.amount, 0));
   const c = bill.customerId ? getCustomer(bill.customerId) : null;
   const sub = [bill.customerPhone, bill.customerType === 'REGULAR' ? 'Regular' : 'One-off'].filter(Boolean).join(' · ');
-  return `${topbar(`Bill #${bill.billNo}`, '/', `<span class="status">${bill.status}</span>`)}
+  return `${topbar(`Bill ${billLabel(bill)}`, '/', `<span class="status">${bill.status}</span>`)}
   <nav class="switcher">
     ${act.map(b => `<button class="chip ${b.id === bill.id ? 'on' : ''}" data-act="openBill" data-id="${b.id}"><b>${esc(billName(b))}</b><small>${money(b.total)}</small></button>`).join('')}
     <button class="chip add" data-act="newBill">＋ New</button>
@@ -407,13 +585,13 @@ function itemRow(it) {
 
 // --- receipt
 function receiptHtml(b) {
-  const s = S.settings;
+  const s = S.shop;
   const when = b.completedAt || b.updatedAt;
   return `<article class="receipt" id="receipt">
     <div class="r-shop">${esc(s.shopName)}</div>
     ${s.shopAddress ? `<div class="r-sub">${esc(s.shopAddress)}</div>` : ''}
     ${s.shopPhone ? `<div class="r-sub">📞 ${esc(s.shopPhone)}</div>` : ''}
-    <div class="r-meta"><span>Bill #${b.billNo}</span><span>${fmtDate(when)}, ${fmtTime(when)}</span></div>
+    <div class="r-meta"><span>Bill ${billLabel(b)}</span><span>${fmtDate(when)}, ${fmtTime(when)}</span></div>
     <div class="r-cust">Customer: <b>${esc(billName(b))}</b>${b.customerPhone ? ` · ${esc(b.customerPhone)}` : ''}</div>
     <div class="r-items">${b.items.map(it => `<div class="r-item ${it.amount < 0 ? 'neg' : ''}">
       <div class="r-name">${esc(it.productName)}${it.amount < 0 ? ' <span class="tag scrap">SCRAP</span>' : ''}</div>
@@ -425,8 +603,8 @@ function receiptHtml(b) {
 function receiptText(b) {
   const when = b.completedAt || b.updatedAt;
   const lines = [
-    S.settings.shopName, S.settings.shopAddress, S.settings.shopPhone && `Ph: ${S.settings.shopPhone}`,
-    `Bill #${b.billNo} · ${fmtDate(when)} ${fmtTime(when)}`,
+    S.shop.shopName, S.shop.shopAddress, S.shop.shopPhone && `Ph: ${S.shop.shopPhone}`,
+    `Bill ${billLabel(b)} · ${fmtDate(when)} ${fmtTime(when)}`,
     `Customer: ${billName(b)}${b.customerPhone ? ' (' + b.customerPhone + ')' : ''}`,
     '------------------------------',
     ...b.items.map(it => `${it.productName}\n  ${lineCalcText(it)} = ${money(it.amount)}`),
@@ -437,7 +615,7 @@ function receiptText(b) {
   return lines.filter(Boolean).join('\n');
 }
 function viewReceipt(bill, back) {
-  return `${topbar(`Bill #${bill.billNo}`, back, `<span class="status">${bill.status}</span>`)}
+  return `${topbar(`Bill ${billLabel(bill)}`, back, `<span class="status">${bill.status}</span>`)}
   <main class="page">
     ${receiptHtml(bill)}
     <div class="btn-row">
@@ -455,16 +633,17 @@ function viewHistory() {
   <main class="page">
     <input id="histSearch" class="input big" type="search" placeholder="🔍 Customer name or bill #" autocomplete="off">
     <div id="histResults">${historyResults('')}</div>
+    <button class="btn-mid" data-act="loadOlder">Load older bills</button>
   </main>`;
 }
 function historyResults(q) {
   const s = q.trim().toLowerCase().replace(/^#/, '');
   const when = b => b.completedAt || b.updatedAt;
-  const list = S.bills
+  const list = allBills()
     .filter(b => b.status === 'COMPLETED' || b.status === 'CANCELLED')
-    .filter(b => !s || billName(b).toLowerCase().includes(s) || String(b.billNo) === s || (b.customerPhone || '').includes(s))
+    .filter(b => !s || billName(b).toLowerCase().includes(s) || billLabel(b).slice(1).toLowerCase() === s || String(b.billNo) === s || (b.customerPhone || '').includes(s))
     .sort((a, b) => when(b).localeCompare(when(a)))
-    .slice(0, 400);
+    .slice(0, 500);
   if (!list.length) return `<p class="empty">${s ? 'No matching bills' : 'No completed bills yet'}</p>`;
   const groups = [];
   for (const b of list) {
@@ -478,7 +657,7 @@ function historyResults(q) {
     return `<div class="day-head"><span>${g.d}</span><span>${plural(done.length, 'bill')} · ${money(total)}</span></div>
     <div class="list">${g.bills.map(b => `<button class="hrow ${b.status === 'CANCELLED' ? 'cancelled' : ''}" data-act="openReceipt" data-id="${b.id}">
       <span class="h-time">${fmtTime(when(b))}</span>
-      <span class="h-main"><b>${esc(billName(b))}</b><small>${plural(b.items.length, 'item')} · #${b.billNo}${b.status === 'CANCELLED' ? ' · <span class="tag cancel">CANCELLED</span>' : ''}</small></span>
+      <span class="h-main"><b>${esc(billName(b))}</b><small>${plural(b.items.length, 'item')} · ${billLabel(b)}${b.status === 'CANCELLED' ? ' · <span class="tag cancel">CANCELLED</span>' : ''}</small></span>
       <span class="h-amt ${b.total < 0 ? 'neg-text' : ''}">${money(b.total)}</span></button>`).join('')}</div>`;
   }).join('');
 }
@@ -504,7 +683,7 @@ function customerAdminResults(q) {
 function viewCustomerForm(id) {
   const isNew = id === 'new';
   const c = isNew ? { name: '', phone: '', address: '', notes: '', type: 'REGULAR' } : getCustomer(id);
-  if (!c) return go('/customers', true);
+  if (!c) return S.loaded.customers ? go('/customers', true) : '<div class="boot">Loading…</div>';
   return `${topbar(isNew ? 'New customer' : 'Edit customer', '/customers')}
   <main class="page">
     <form id="custForm" class="form" data-id="${isNew ? '' : c.id}" autocomplete="off">
@@ -565,7 +744,7 @@ function productAdminResults(q) {
 function viewProductForm(id) {
   const isNew = id === 'new';
   const p = isNew ? makeProduct({ name: '', category: 'PIECE', price: 0 }) : getProduct(id);
-  if (!p) return go('/products', true);
+  if (!p) return S.loaded.products ? go('/products', true) : '<div class="boot">Loading…</div>';
   const sign = p.price < 0 || (isNew && p.category === 'SCRAP') ? -1 : 1;
   const opts = (obj, sel, fn) => Object.entries(obj).map(([k, v]) => `<option value="${k}" ${k === sel ? 'selected' : ''}>${fn(v, k)}</option>`).join('');
   return `${topbar(isNew ? 'New product' : 'Edit product', '/products')}
@@ -603,39 +782,48 @@ function viewProductForm(id) {
 
 // --- settings
 function viewSettings() {
-  const s = S.settings;
-  const counts = `${plural(S.products.length, 'product')} · ${plural(S.customers.length, 'customer')} · ${plural(S.bills.length, 'bill')}`;
+  const s = S.shop;
+  const last = local.get('lastBackupAt');
+  const counts = `${plural(S.products.length, 'product')} · ${plural(S.customers.length, 'customer')} · ${plural(S.bills.length, 'recent bill')}`;
   return `${topbar('Settings', '/')}
   <main class="page">
-    <section class="card"><h2>Shop</h2>
-      <label class="lbl" for="sName">SHOP NAME</label><input id="sName" class="input big" data-setting="shopName" value="${esc(s.shopName)}">
-      <label class="lbl" for="sAddr">ADDRESS (printed on bill)</label><input id="sAddr" class="input big" data-setting="shopAddress" value="${esc(s.shopAddress)}">
-      <label class="lbl" for="sPhone">PHONE (printed on bill)</label><input id="sPhone" class="input big" type="tel" data-setting="shopPhone" value="${esc(s.shopPhone)}">
-      <label class="check"><input type="checkbox" data-setting="showTodaySales" ${s.showTodaySales ? 'checked' : ''}> Show today's sales on home screen</label>
+    <section class="card"><h2>Account & sync</h2>
+      <p>Signed in as <b>${esc(S.user.email)}</b></p>
+      <p><span class="sync-badge"></span></p>
+      <label class="lbl" for="sDev">BILL LETTER FOR THIS PHONE</label>
+      <input id="sDev" class="input big" data-local="deviceCode" maxlength="2" autocapitalize="characters" value="${esc(deviceCode())}">
+      <p class="hint">Bills from this phone are numbered ${esc(deviceCode())}-1, ${esc(deviceCode())}-2… Use a different letter on each phone.</p>
+      <button class="btn-mid" data-act="signOut">Sign out</button>
     </section>
-    <section class="card"><h2>Voice input</h2>
+    <section class="card"><h2>Shop <small>(shared by all phones)</small></h2>
+      <label class="lbl" for="sName">SHOP NAME</label><input id="sName" class="input big" data-shop="shopName" value="${esc(s.shopName)}">
+      <label class="lbl" for="sAddr">ADDRESS (printed on bill)</label><input id="sAddr" class="input big" data-shop="shopAddress" value="${esc(s.shopAddress)}">
+      <label class="lbl" for="sPhone">PHONE (printed on bill)</label><input id="sPhone" class="input big" type="tel" data-shop="shopPhone" value="${esc(s.shopPhone)}">
+      <label class="check"><input type="checkbox" data-shop="showTodaySales" ${s.showTodaySales ? 'checked' : ''}> Show today's sales on home screen</label>
+    </section>
+    <section class="card"><h2>Voice input <small>(this phone)</small></h2>
       <label class="lbl" for="sLang">LANGUAGE</label>
-      <select id="sLang" class="input big" data-setting="voiceLang">${Object.entries(VOICE_LANGS).map(([k, v]) => `<option value="${k}" ${k === s.voiceLang ? 'selected' : ''}>${v}</option>`).join('')}</select>
-      <p class="hint">${voice.supported ? '✅ Voice input works in this browser.' : '⚠ This browser has no voice input — the keyboard is used instead.'} Chrome's voice recognition usually needs internet; everything else works offline.</p>
+      <select id="sLang" class="input big" data-local="voiceLang">${Object.entries(VOICE_LANGS).map(([k, v]) => `<option value="${k}" ${k === local.get('voiceLang', 'en-IN') ? 'selected' : ''}>${v}</option>`).join('')}</select>
+      <p class="hint">${voice.supported ? '✅ Voice input works in this browser.' : '⚠ This browser has no voice input — the keyboard is used instead.'} Chrome's voice recognition usually needs internet.</p>
     </section>
     <section class="card"><h2>Weighing machine</h2>
       <p>Current: <b>${esc(scale.name)}</b></p>
       <p class="hint">Type the weight shown on the machine. Bluetooth scale support can be added in a later version.</p>
     </section>
     <section class="card"><h2>Backup</h2>
-      <p>Last backup: <b>${s.lastBackupAt ? `${fmtDate(s.lastBackupAt)}, ${fmtTime(s.lastBackupAt)}` : 'Never'}</b></p>
-      <p class="hint">Data is stored only on this phone. Export a backup every week and keep a copy on WhatsApp / Drive.</p>
+      <p>Last backup from this phone: <b>${last ? `${fmtDate(last)}, ${fmtTime(last)}` : 'Never'}</b></p>
+      <p class="hint">Data is kept in the cloud and on each phone. An extra backup file once a month is still a good idea.</p>
       <button class="btn-mid" data-act="exportBackup">⬇ EXPORT BACKUP</button>
       <button class="btn-mid" data-act="importBackup">⬆ IMPORT BACKUP</button>
       <input type="file" id="importFile" accept="application/json,.json" hidden>
     </section>
     <section class="card"><h2>Data</h2>
       <p>${counts}</p>
-      <p class="hint" id="storageInfo">Checking storage…</p>
+      <p class="hint" id="storageInfo"></p>
       <button class="btn-mid" data-act="loadSamples">Add sample products</button>
       <button class="btn-mid danger" data-act="clearAll">🗑 CLEAR ALL DATA</button>
     </section>
-    <p class="ver">A One Billing v${APP_VERSION} · works offline</p>
+    <p class="ver">A One Billing v${APP_VERSION}${cloud.emulator ? ' · EMULATOR' : ''}</p>
   </main>`;
 }
 async function fillStorageInfo() {
@@ -643,12 +831,8 @@ async function fillStorageInfo() {
   if (!el) return;
   try {
     const persisted = await navigator.storage?.persisted?.();
-    const est = await navigator.storage?.estimate?.();
-    const kb = est ? Math.round(est.usage / 1024) : null;
-    el.textContent = `${persisted ? '🔒 Protected storage' : 'Standard storage (install the app to protect it)'}${kb != null ? ` · ${kb} KB used` : ''}`;
-  } catch {
-    el.textContent = '';
-  }
+    el.textContent = persisted ? '🔒 Offline copy on this phone is protected' : 'Install the app to protect the offline copy on this phone';
+  } catch { /* not supported */ }
 }
 
 // ---------------------------------------------------------------- sheet & modal
@@ -659,13 +843,14 @@ function openSheet(html) {
   w.hidden = false;
   document.body.classList.add('noscroll');
 }
-function closeSheet() {
+function closeSheet(fromRender = false) {
   const w = $('#sheet');
   if (w.hidden) return;
   w.hidden = true;
   w.innerHTML = '';
   sheetCtx = null;
   document.body.classList.remove('noscroll');
+  if (!fromRender) setTimeout(flushRender, 60);
 }
 $('#sheet').addEventListener('click', e => { if (e.target.id === 'sheet') closeSheet(); });
 
@@ -688,6 +873,7 @@ function confirmBox({ title, body = '', ok = 'YES', cancel = 'NO', danger = fals
       m.innerHTML = '';
       m.onclick = null;
       resolve(yes);
+      setTimeout(flushRender, 60);
     };
   });
 }
@@ -702,7 +888,7 @@ function openQtySheet(billId, productId, itemId = null) {
     ? { name: item.productName, category: item.category, unit: item.unit, priceType: item.priceType, rate: item.rate, allowDecimal: item.allowDecimal ?? UNITS[item.unit].decimal }
     : { name: p.name, category: p.category, unit: p.unit, priceType: p.priceType, rate: p.price, allowDecimal: p.allowDecimal };
   const sign = src.rate < 0 || (!src.rate && src.category === 'SCRAP') ? -1 : 1;
-  sheetCtx = { billId, productId: item ? item.productId : p.id, itemId, sign, ...src };
+  sheetCtx = { billId, productId: item ? item.productId : p.id, itemId, addedAt: item?.addedAt, sign, ...src };
   const neg = sign < 0;
   const needRate = !src.rate;
   const per = PRICE_TYPES[src.priceType]?.per;
@@ -756,19 +942,34 @@ function updateCalc() {
 }
 
 // ---------------------------------------------------------------- actions
-let busy = false;
 const A = {
-  closeSheet,
+  closeSheet: () => closeSheet(),
 
-  async newBill() {
-    if (busy) return;
-    busy = true;
+  // --- account
+  async signIn() {
     try {
-      const b = await createBill();
-      go(`/bill/${b.id}/customer`);
-    } finally {
-      busy = false;
+      await cloud.signIn();
+    } catch (e) {
+      const msg = {
+        'auth/unauthorized-domain': 'This website is not allowed yet: add it in Firebase → Authentication → Settings → Authorized domains',
+        'auth/network-request-failed': 'No internet — connect once to sign in',
+        'auth/popup-closed-by-user': '',
+        'auth/cancelled-popup-request': '',
+      }[e.code];
+      if (msg !== '') toast(msg || 'Sign-in failed: ' + (e.code || e.message), 'err');
     }
+  },
+  async emuSignIn() {
+    await cloud.emuSignIn($('#emuEmail').value.trim());
+  },
+  async signOut() {
+    if (S.user && !S.denied && !await confirmBox({ title: 'Sign out?', body: 'You will need internet to sign in again.', ok: 'SIGN OUT' })) return;
+    await cloud.signOut();
+  },
+
+  newBill() {
+    const b = createBill();
+    go(`/bill/${b.id}/customer`);
   },
   openBill(el) {
     const b = getBill(el.dataset.id);
@@ -788,7 +989,7 @@ const A = {
     el.classList.add('listening');
     toast('🎤 Listening… say the name');
     try {
-      input.value = await voice.listen(S.settings.voiceLang);
+      input.value = await voice.listen(local.get('voiceLang', 'en-IN'));
       input.dispatchEvent(new Event('input', { bubbles: true }));
       $('#toast').hidden = true;
     } catch (err) {
@@ -800,16 +1001,16 @@ const A = {
   },
 
   // --- customer for bill
-  async pickCustomer(el) {
+  pickCustomer(el) {
     const c = getCustomer(el.dataset.id);
-    await setBillCustomer({ id: c.id, name: c.name, phone: c.phone, type: 'REGULAR' });
+    setBillCustomer({ id: c.id, name: c.name, phone: c.phone, type: 'REGULAR' });
   },
-  async useTypedName() {
-    await setBillCustomer({ id: null, name: $('#custSearch').value.trim(), phone: '', type: 'ONE_OFF' });
+  useTypedName() {
+    setBillCustomer({ id: null, name: $('#custSearch').value.trim(), phone: '', type: 'ONE_OFF' });
   },
-  async saveTypedName() {
-    const c = await saveCustomer({ name: $('#custSearch').value.trim() });
-    await setBillCustomer({ id: c.id, name: c.name, phone: '', type: 'REGULAR' });
+  saveTypedName() {
+    const c = saveCustomer({ name: $('#custSearch').value.trim() });
+    setBillCustomer({ id: c.id, name: c.name, phone: '', type: 'REGULAR' });
   },
   oneOff() {
     const pre = $('#custSearch')?.value.trim() || '';
@@ -824,14 +1025,14 @@ const A = {
       <button type="button" class="btn-big go" data-act="confirmOneOff">CONTINUE ›</button>`);
     $('#ooName').focus();
   },
-  async confirmOneOff() {
+  confirmOneOff() {
     const name = $('#ooName').value.trim();
     const phone = $('#ooPhone').value.trim();
     if ($('#ooSave').checked && name) {
-      const c = await saveCustomer({ name, phone });
+      const c = saveCustomer({ name, phone });
       return setBillCustomer({ id: c.id, name, phone, type: 'REGULAR' });
     }
-    await setBillCustomer({ id: null, name, phone, type: 'ONE_OFF' });
+    setBillCustomer({ id: null, name, phone, type: 'ONE_OFF' });
   },
 
   // --- items
@@ -855,9 +1056,9 @@ const A = {
       toast(e.message, 'err');
     }
   },
-  async confirmQty() {
+  confirmQty() {
     const ctx = sheetCtx;
-    if (!ctx || busy) return;
+    if (!ctx) return;
     const q = num($('#qtyIn').value);
     const rate = currentRate();
     if (!rate) {
@@ -871,23 +1072,14 @@ const A = {
     }
     if (!ctx.allowDecimal && !Number.isInteger(q)) return toast(`Whole numbers only for ${ctx.name}`, 'err');
     const bill = getBill(ctx.billId);
+    if (!bill) return toast('This bill was closed on another phone', 'err');
     const amount = lineAmount(q, rate, ctx.unit, ctx.priceType);
-    if (ctx.itemId) {
-      Object.assign(bill.items.find(i => i.id === ctx.itemId), { quantity: q, rate, amount, isNegative: rate < 0 });
-    } else {
-      bill.items.push({
-        id: uid(), billId: bill.id, productId: ctx.productId, productName: ctx.name, category: ctx.category,
-        unit: ctx.unit, priceType: ctx.priceType, allowDecimal: ctx.allowDecimal,
-        quantity: q, rate, amount, isNegative: rate < 0, addedAt: now(),
-      });
-    }
-    if (bill.status === 'DRAFT') bill.status = 'ACTIVE';
-    busy = true;
-    try {
-      await saveBill(bill);
-    } finally {
-      busy = false;
-    }
+    const item = {
+      id: ctx.itemId || uid(), billId: bill.id, productId: ctx.productId, productName: ctx.name, category: ctx.category,
+      unit: ctx.unit, priceType: ctx.priceType, allowDecimal: ctx.allowDecimal,
+      quantity: q, rate, amount, isNegative: rate < 0, addedAt: ctx.addedAt || now(), addedBy: S.user.email,
+    };
+    putBillItem(bill, item, bill.status === 'DRAFT' ? { status: 'ACTIVE' } : {});
     toast(`${ctx.itemId ? 'Updated' : '✓ Added'} ${ctx.name}  ${money(amount)}`);
     render(true);
   },
@@ -896,47 +1088,39 @@ const A = {
     const bill = getBill(ctx.billId);
     const it = bill.items.find(i => i.id === ctx.itemId);
     if (!await confirmBox({ title: `Remove ${esc(it.productName)}?`, body: `${lineCalcText(it)} = ${money(it.amount)}`, ok: 'REMOVE', danger: true })) return;
-    bill.items = bill.items.filter(i => i !== it);
-    await saveBill(bill);
+    dropBillItem(getBill(ctx.billId), it.id);
     toast('Item removed');
     render(true);
   },
 
   // --- bill actions
-  async saveBill() {
+  saveBill() {
     const bill = getBill(R.b);
-    if (bill.status === 'DRAFT') bill.status = 'ACTIVE';
-    await saveBill(bill);
+    updateBill(bill, { status: 'ACTIVE' });
     toast('✓ Bill saved');
     go('/');
   },
   async completeBill() {
-    const bill = getBill(R.b);
+    let bill = getBill(R.b);
     if (!bill.items.length) return toast('Add at least one item first', 'err');
     const amt = bill.total < 0 ? `Pay to customer <b>${money(Math.abs(bill.total))}</b>` : `Total <b>${money(bill.total)}</b>`;
     if (!await confirmBox({ title: `Complete bill for ${esc(billName(bill))}?`, body: `${plural(bill.items.length, 'item')} · ${amt}`, ok: '✓ COMPLETE' })) return;
-    bill.status = 'COMPLETED';
-    bill.completedAt = now();
-    await saveBill(bill);
+    bill = getBill(bill.id); // may have changed on the other phone meanwhile
+    if (!bill || bill.status !== 'ACTIVE' && bill.status !== 'DRAFT') return toast('This bill was already closed on another phone', 'err');
+    const at = now();
+    updateBill(bill, { status: 'COMPLETED', completedAt: at, completedBy: S.user.email });
     adjustStock(bill);
-    if (bill.customerId) {
-      const c = getCustomer(bill.customerId);
-      if (c) {
-        c.lastBilledAt = bill.completedAt;
-        persist('customers', c);
-      }
-    }
+    if (bill.customerId && getCustomer(bill.customerId)) cloud.update('customers', bill.customerId, { lastBilledAt: at });
     toast('✓ Bill completed');
     go(`/done/${bill.id}`, true);
   },
   async cancelBill() {
     const bill = getBill(R.b);
     if (!await confirmBox({ title: `Cancel bill for ${esc(billName(bill))}?`, body: bill.items.length ? `${plural(bill.items.length, 'item')} · ${money(bill.total)} will be cancelled.` : '', ok: 'CANCEL BILL', cancel: 'KEEP', danger: true })) return;
-    if (bill.items.length) {
-      bill.status = 'CANCELLED';
-      await saveBill(bill);
-    } else {
-      await deleteBill(bill);
+    const b = getBill(bill.id);
+    if (b) {
+      if (b.items.length) updateBill(b, { status: 'CANCELLED', cancelledBy: S.user.email });
+      else deleteBill(b);
     }
     toast('Bill cancelled');
     go('/', true);
@@ -945,7 +1129,7 @@ const A = {
     const bill = getBill(el.dataset.id);
     const text = receiptText(bill);
     try {
-      if (navigator.share) await navigator.share({ title: `Bill #${bill.billNo}`, text });
+      if (navigator.share) await navigator.share({ title: `Bill ${billLabel(bill)}`, text });
       else {
         await navigator.clipboard.writeText(text);
         toast('Bill copied — paste it in WhatsApp/SMS');
@@ -955,30 +1139,44 @@ const A = {
     }
   },
   printBill() { window.print(); },
+  async loadOlder(el) {
+    if (!navigator.onLine) return toast('Needs internet to load older bills', 'err');
+    el.disabled = true;
+    el.textContent = 'Loading…';
+    try {
+      const dates = allBills().map(b => b.updatedAt).sort();
+      const before = S.olderBills.length ? dates[0] : recentCutoff();
+      const rows = await cloud.loadBillsBefore(before);
+      S.olderBills.push(...rows.map(billFromDoc));
+      toast(rows.length ? `Loaded ${plural(rows.length, 'older bill')}` : 'No older bills');
+      render(true);
+    } catch (e) {
+      toast('Could not load: ' + e.message, 'err');
+      el.disabled = false;
+    }
+  },
 
   // --- customers
-  async billForCustomer(el) {
+  billForCustomer(el) {
     const c = getCustomer(el.dataset.id);
-    const b = await createBill();
-    Object.assign(b, { customerChosen: true, customerId: c.id, customerName: c.name, customerPhone: c.phone, customerType: 'REGULAR' });
-    await saveBill(b);
+    const b = createBill();
+    updateBill(b, { customerChosen: true, customerId: c.id, customerName: c.name, customerPhone: c.phone, customerType: 'REGULAR' });
     go(`/bill/${b.id}/add`);
   },
   async deleteCustomer(el) {
     const c = getCustomer(el.dataset.id);
-    if (!await confirmBox({ title: `Delete ${esc(c.name)}?`, body: 'Old bills keep the name. This cannot be undone.', ok: 'DELETE', danger: true })) return;
-    S.customers = S.customers.filter(x => x !== c);
-    await remove('customers', c.id);
+    if (!await confirmBox({ title: `Delete ${esc(c.name)}?`, body: 'Removed from both phones. Old bills keep the name.', ok: 'DELETE', danger: true })) return;
+    S.customers = S.customers.filter(x => x.id !== c.id);
+    cloud.remove('customers', c.id);
     toast('Customer deleted');
     go('/customers', true);
   },
 
   // --- products
-  async toggleFav(el) {
+  toggleFav(el) {
     const p = getProduct(el.dataset.id);
     p.favourite = !p.favourite;
-    p.updatedAt = now();
-    await persist('products', p);
+    cloud.update('products', p.id, { favourite: p.favourite, updatedAt: now() });
     el.classList.toggle('on', p.favourite);
     toast(p.favourite ? `⭐ ${p.name} added to quick items` : `${p.name} removed from quick items`);
   },
@@ -996,7 +1194,7 @@ const A = {
       </div>
       <label class="lbl" for="priceIn">NEW PRICE ₹${per ? ' / ' + per : ''}</label>
       <input id="priceIn" class="qty-input" inputmode="decimal" autocomplete="off" value="${p.price ? Math.abs(p.price) : ''}">
-      <p class="hint">Applies to items added from now on. Existing bills keep the price they were made with.</p>
+      <p class="hint">Updates on both phones. Applies to items added from now on — existing bills keep their price.</p>
       <button type="button" class="btn-big go" data-act="savePrice">SAVE PRICE</button>`);
     $('#priceIn').focus();
     $('#priceIn').select();
@@ -1005,30 +1203,81 @@ const A = {
     sheetCtx.sign = Number(el.dataset.s);
     el.parentElement.querySelectorAll('button').forEach(b => b.classList.toggle('on', b === el));
   },
-  async savePrice() {
+  savePrice() {
     const p = getProduct(sheetCtx.productId);
     const v = num($('#priceIn').value);
     if (isNaN(v) || v < 0) return toast('Enter a valid price', 'err');
     const old = p.price;
     p.price = sheetCtx.sign * v;
     p.isNegative = p.price < 0;
-    p.updatedAt = now();
-    await persist('products', p);
+    cloud.update('products', p.id, { price: p.price, isNegative: p.isNegative, updatedAt: now() });
     toast(`✓ ${p.name}: ${money(old)} → ${money(p.price)}`);
     render(true);
   },
   async deleteProduct(el) {
     const p = getProduct(el.dataset.id);
-    if (!await confirmBox({ title: `Delete ${esc(p.name)}?`, body: 'Old bills are not affected. Tip: you can mark it Inactive instead.', ok: 'DELETE', danger: true })) return;
-    S.products = S.products.filter(x => x !== p);
-    await remove('products', p.id);
+    if (!await confirmBox({ title: `Delete ${esc(p.name)}?`, body: 'Removed from both phones. Old bills are not affected. Tip: you can mark it Inactive instead.', ok: 'DELETE', danger: true })) return;
+    S.products = S.products.filter(x => x.id !== p.id);
+    cloud.remove('products', p.id);
     toast('Product deleted');
     go('/products', true);
   },
+  loadSamples() {
+    const have = new Set(S.products.map(p => p.name.toLowerCase()));
+    const add = SAMPLE_PRODUCTS.filter(r => !have.has(r[0].toLowerCase())).map(sampleToProduct);
+    if (!add.length) return toast('Sample products already present');
+    S.products.push(...add);
+    add.forEach(p => cloud.put('products', p));
+    toast(`Added ${plural(add.length, 'product')}`);
+    render(true);
+  },
 
-  // --- settings / backup
+  // --- migration of pre-sync data on this phone
+  dismissMigrate() {
+    local.set('migrated', true);
+    render(true);
+  },
+  async migrate(el) {
+    if (!navigator.onLine) return toast('Connect to the internet to upload', 'err');
+    const L = S.legacy;
+    const names = new Set(S.products.map(p => p.name.toLowerCase()));
+    const people = new Set(S.customers.map(c => `${c.name.toLowerCase()}|${c.phone || ''}`));
+    const dev = deviceCode();
+    const shop = Object.fromEntries((L.settings || []).filter(r => r.key in DEFAULT_SHOP).map(r => [r.key, r.value]));
+    const data = {
+      products: L.products.filter(p => !names.has(p.name.toLowerCase())),
+      customers: L.customers.filter(c => !people.has(`${c.name.toLowerCase()}|${c.phone || ''}`)),
+      bills: L.bills.filter(b => b.items?.length).map(b => billToDoc({ ...b, device: b.device || dev, createdBy: b.createdBy || S.user.email })),
+      meta: S.loaded.meta && S.shop.shopName === DEFAULT_SHOP.shopName && Object.keys(shop).length ? [{ id: 'shop', ...shop }] : [],
+    };
+    const maxNo = Math.max(0, ...data.bills.filter(b => b.device === dev).map(b => b.billNo));
+    el.disabled = true;
+    el.textContent = 'Uploading…';
+    try {
+      await cloud.writeAll(data);
+      if (maxNo) {
+        local.set('counter.' + dev, Math.max(local.get('counter.' + dev, 0), maxNo));
+        cloud.setMeta('counters', { [dev]: Math.max(S.counters[dev] || 0, maxNo) });
+      }
+      local.set('migrated', true);
+      toast(`✓ Uploaded ${plural(data.products.length, 'product')}, ${plural(data.customers.length, 'customer')}, ${plural(data.bills.length, 'bill')}`);
+      render(true);
+    } catch (e) {
+      toast('Upload failed: ' + e.message, 'err');
+      el.disabled = false;
+      el.textContent = 'UPLOAD';
+    }
+  },
+
+  // --- backup
   async exportBackup() {
-    const data = { app: 'aone-billing', version: APP_VERSION, exportedAt: now(), ...(await db.exportAll()) };
+    let data;
+    try {
+      data = await cloud.exportAll();
+    } catch (e) {
+      return toast('Could not read data: ' + e.message, 'err');
+    }
+    data = { app: 'aone-billing', version: APP_VERSION, exportedAt: now(), ...data };
     const name = `aone-backup-${new Date().toISOString().slice(0, 16).replace(/[T:]/g, '-')}.json`;
     const blob = new Blob([JSON.stringify(data, null, 1)], { type: 'application/json' });
     const file = new File([blob], name, { type: 'application/json' });
@@ -1050,58 +1299,29 @@ const A = {
       a.remove();
       setTimeout(() => URL.revokeObjectURL(a.href), 5000);
     }
-    await setSetting('lastBackupAt', now());
+    local.set('lastBackupAt', now());
     toast('✓ Backup exported');
     render(true);
   },
   importBackup() { $('#importFile').click(); },
-  async loadSamples() {
-    const have = new Set(S.products.map(p => p.name.toLowerCase()));
-    const add = SAMPLE_PRODUCTS.filter(r => !have.has(r[0].toLowerCase())).map(sampleToProduct);
-    if (!add.length) return toast('Sample products already present');
-    S.products.push(...add);
-    await db.putMany('products', add);
-    toast(`Added ${plural(add.length, 'product')}`);
-    render(true);
-  },
   async clearAll() {
-    if (!await confirmBox({ title: 'Clear ALL data?', body: 'Products, customers, open bills and history will be erased from this phone. Export a backup first!', ok: 'ERASE', danger: true, typeToConfirm: 'DELETE' })) return;
-    await db.clearAll();
-    S.products = [];
-    S.customers = [];
-    S.bills = [];
-    S.settings = { ...DEFAULT_SETTINGS, seeded: true };
-    await db.putMany('settings', Object.entries(S.settings).map(([key, value]) => ({ key, value })));
-    toast('All data cleared');
-    go('/', true);
+    if (!navigator.onLine) return toast('Connect to the internet first', 'err');
+    if (!await confirmBox({ title: 'Clear ALL data?', body: 'Products, customers, open bills and history will be erased <b>from the cloud and from every phone</b>. Export a backup first!', ok: 'ERASE', danger: true, typeToConfirm: 'DELETE' })) return;
+    try {
+      await cloud.deleteAll();
+      S.olderBills = [];
+      toast('All data cleared');
+      go('/', true);
+    } catch (e) {
+      toast('Could not clear: ' + e.message, 'err');
+    }
   },
 };
 
-async function setBillCustomer({ id, name, phone, type }) {
+function setBillCustomer({ id, name, phone, type }) {
   const bill = getBill(R.b);
-  Object.assign(bill, { customerChosen: true, customerId: id, customerName: name, customerPhone: phone || '', customerType: type });
-  await saveBill(bill);
+  updateBill(bill, { customerChosen: true, customerId: id, customerName: name, customerPhone: phone || '', customerType: type });
   go(bill.items.length ? `/bill/${bill.id}` : `/bill/${bill.id}/add`, true);
-}
-async function saveCustomer(f, existing = null) {
-  const c = existing || { id: uid(), createdAt: now(), lastBilledAt: null };
-  Object.assign(c, { name: f.name, phone: f.phone || '', address: f.address || '', notes: f.notes || '', type: f.type || 'REGULAR', updatedAt: now() });
-  if (!existing) S.customers.push(c);
-  await persist('customers', c);
-  return c;
-}
-function adjustStock(bill) {
-  for (const it of bill.items) {
-    const p = getProduct(it.productId);
-    if (p && typeof p.stock === 'number' && p.unit === it.unit) {
-      p.stock = round3(p.stock + (it.rate < 0 ? it.quantity : -it.quantity)); // scrap comes in, sales go out
-      p.updatedAt = now();
-      persist('products', p);
-    }
-  }
-}
-function sampleToProduct([name, category, unit, price, favourite, stock]) {
-  return makeProduct({ name, category, unit, price, favourite, stock, minStock: stock != null ? (unit === 'KG' ? 10 : 10) : null });
 }
 
 // ---------------------------------------------------------------- events
@@ -1131,6 +1351,7 @@ const ENTER = {
   priceIn: () => A.savePrice(),
   ooName: () => $('#ooPhone').focus(),
   ooPhone: () => A.confirmOneOff(),
+  emuEmail: () => A.emuSignIn(),
   prodSearch: () => $('#prodResults [data-act="pickProduct"]')?.click(),
   custSearch: () => $('#custResults [data-act]')?.click(),
 };
@@ -1144,8 +1365,19 @@ document.addEventListener('keydown', e => {
 
 document.addEventListener('change', async e => {
   const t = e.target;
-  if (t.dataset.setting) {
-    await setSetting(t.dataset.setting, t.type === 'checkbox' ? t.checked : t.value.trim());
+  const value = t.type === 'checkbox' ? t.checked : t.value.trim();
+  if (t.dataset.shop) {
+    S.shop[t.dataset.shop] = value;
+    cloud.setMeta('shop', { [t.dataset.shop]: value });
+    toast('✓ Saved for all phones');
+  } else if (t.dataset.local === 'deviceCode') {
+    const code = value.toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 2);
+    if (!code) return toast('Enter a letter', 'err');
+    local.set('deviceCode', code);
+    toast(`✓ New bills will be ${code}-…`);
+    render(true);
+  } else if (t.dataset.local) {
+    local.set(t.dataset.local, value);
     toast('✓ Saved');
   } else if (t.id === 'importFile' && t.files[0]) {
     await importFile(t.files[0]);
@@ -1174,7 +1406,7 @@ document.addEventListener('submit', async e => {
     if (!d.name) return toast('Enter customer name', 'err');
     const dup = S.customers.find(c => c.name.toLowerCase() === d.name.toLowerCase() && c.id !== f.dataset.id);
     if (dup && !await confirmBox({ title: `“${esc(d.name)}” already exists`, body: 'Save another customer with the same name?', ok: 'SAVE' })) return;
-    await saveCustomer(d, f.dataset.id ? getCustomer(f.dataset.id) : null);
+    saveCustomer(d, f.dataset.id ? getCustomer(f.dataset.id) : null);
     toast('✓ Customer saved');
     go('/customers', true);
   } else if (f.id === 'prodForm') {
@@ -1184,15 +1416,15 @@ document.addEventListener('submit', async e => {
     if (isNaN(mag) || mag < 0) return toast('Enter a valid price', 'err');
     const optNum = v => (v === '' || v == null || isNaN(num(v)) ? null : num(v));
     const existing = f.dataset.id ? getProduct(f.dataset.id) : null;
-    const p = existing || makeProduct({ name, category: d.category });
+    const p = existing ? { ...existing } : makeProduct({ name, category: d.category });
     const price = Number(d.sign) * mag || 0;
     Object.assign(p, {
       name, category: d.category, unit: d.unit, priceType: d.priceType, price, isNegative: price < 0,
       sku: (d.sku || '').trim(), stock: optNum(d.stock), minStock: optNum(d.minStock),
       allowDecimal: !!d.allowDecimal, favourite: !!d.favourite, active: !!d.active, updatedAt: now(),
     });
-    if (!existing) S.products.push(p);
-    await persist('products', p);
+    S.products = S.products.filter(x => x.id !== p.id).concat(p);
+    cloud.put('products', p);
     toast('✓ Product saved');
     go('/products', true);
   }
@@ -1208,11 +1440,18 @@ async function importFile(file) {
   if (data.app !== 'aone-billing' || !Array.isArray(data.products) || !Array.isArray(data.bills)) {
     return toast('That file is not an A One backup', 'err');
   }
-  const body = `Backup from ${data.exportedAt ? fmtDate(data.exportedAt) : 'unknown date'}: ${plural(data.products.length, 'product')}, ${plural((data.customers || []).length, 'customer')}, ${plural(data.bills.length, 'bill')}.<br><b>All current data on this phone will be replaced.</b>`;
+  if (!navigator.onLine) return toast('Connect to the internet to restore', 'err');
+  const body = `Backup from ${data.exportedAt ? fmtDate(data.exportedAt) : 'unknown date'}: ${plural(data.products.length, 'product')}, ${plural((data.customers || []).length, 'customer')}, ${plural(data.bills.length, 'bill')}.<br><b>All current data in the cloud and on every phone will be replaced.</b>`;
   if (!await confirmBox({ title: 'Restore this backup?', body, ok: 'RESTORE', danger: true })) return;
+  // v1 backups store settings as key/value rows and bill items as arrays.
+  const meta = data.meta || (data.settings ? [{ id: 'shop', ...Object.fromEntries(data.settings.filter(r => r.key in DEFAULT_SHOP).map(r => [r.key, r.value])) }] : []);
+  const dev = deviceCode();
+  const bills = data.bills.map(b => billToDoc(billFromDoc({ ...b, device: b.device || dev })));
   try {
-    await db.replaceAll(data);
-    await load();
+    toast('Restoring…');
+    await cloud.deleteAll();
+    await cloud.writeAll({ products: data.products, customers: data.customers || [], bills, meta });
+    S.olderBills = [];
     toast('✓ Backup restored');
     go('/', true);
   } catch (e) {
@@ -1221,28 +1460,33 @@ async function importFile(file) {
 }
 
 // ---------------------------------------------------------------- boot
-async function load() {
-  const [products, customers, bills, settingsRows] = await Promise.all(['products', 'customers', 'bills', 'settings'].map(s => db.all(s)));
-  S.products = products;
-  S.customers = customers;
-  S.bills = bills;
-  S.settings = { ...DEFAULT_SETTINGS, ...Object.fromEntries(settingsRows.map(r => [r.key, r.value])) };
-  if (!S.settings.seeded) {
-    S.products = SAMPLE_PRODUCTS.map(sampleToProduct);
-    await db.putMany('products', S.products);
-    await setSetting('seeded', true);
-  }
+async function checkLegacy() {
+  try {
+    if (local.get('migrated')) return;
+    if (indexedDB.databases && !(await indexedDB.databases()).some(d => d.name === 'aone-billing')) return;
+    const data = await legacyDb.exportAll();
+    if (data.products.length || data.customers.length || data.bills.length) S.legacy = data;
+  } catch { /* nothing to migrate */ }
 }
 
-async function init() {
-  try {
-    await load();
-  } catch (e) {
-    app.innerHTML = `<div class="boot">⚠ Could not open local storage.<br>${esc(e.message)}</div>`;
-    return;
-  }
+function init() {
+  cloud.onError = e => {
+    console.error(e);
+    if (e.code === 'permission-denied') {
+      S.denied = true;
+      render();
+    } else toast('⚠ Sync problem: ' + (e.message || e), 'err');
+  };
+  cloud.watchAuth(user => {
+    if (unsubscribe) unsubscribe();
+    unsubscribe = null;
+    Object.assign(S, { user, denied: false, products: [], customers: [], bills: [], olderBills: [], loaded: {}, fromServer: {}, pending: {} });
+    if (user) unsubscribe = cloud.subscribe(onData, cloud.onError, recentCutoff());
+    render();
+  });
   window.addEventListener('hashchange', () => render());
   render();
+  checkLegacy().then(() => S.legacy && S.user && render(true));
   if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').catch(err => console.warn('SW', err));
   navigator.storage?.persist?.().catch(() => {});
 }
