@@ -392,3 +392,8 @@ textarea.input { resize: vertical; }
 .items.scrap-box { border-color: var(--neg-line); }
 .r-subtotal { display: flex; justify-content: space-between; padding: 8px 0 4px; border-top: 1px dashed var(--line); font-weight: 800; }
 .r-section { margin-top: 14px; font-weight: 900; letter-spacing: .05em; font-size: 15px; }
+
+/* Devanagari needs normal letter spacing to join letters correctly */
+html[lang="hi"] body * { letter-spacing: 0 !important; }
+html[lang="hi"] .lbl, html[lang="hi"] .sec-label, html[lang="hi"] .sec-head, html[lang="hi"] .stat span,
+html[lang="hi"] .total-row span, html[lang="hi"] .cc-main small:first-child, html[lang="hi"] .subtotal span { font-size: 15px; }

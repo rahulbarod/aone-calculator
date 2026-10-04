@@ -1,4 +1,4 @@
-# A One Enterprise — Billing & Weight Calculator (v2.2.2, cloud sync)
+# A One Enterprise — Billing & Weight Calculator (v2.3, cloud sync)
 
 Offline-first PWA for counter billing. Plain HTML/CSS/JS, no build step.
 Products, customers and bills sync live between phones through Firebase (Firestore),
@@ -37,6 +37,7 @@ Phones get the new version the next time the app is opened twice.
 | `js/app.js` | Screens, billing logic, routing |
 | `js/cloud.js` | Firebase config, Google sign-in, live sync, offline cache |
 | `js/db.js` | Reads data saved by v1 (before sync) for the one-time upload |
+| `js/i18n.js` | Hindi screen text (dictionary); choose per phone in Settings → भाषा / Language |
 | `js/parse.js` | Understands spoken new-product lines ("thrust bearing 80 no. 365 rs") |
 | `js/voice.js` | Speech-to-text for customer names, with keyboard fallback |
 | `js/scale.js` | Weighing-machine adapter slot (manual entry for now) |
@@ -61,6 +62,11 @@ Phones get the new version the next time the app is opened twice.
 - Only quantity and price are needed to bill. Missing unit (or price not saved to catalogue) → the product is **flagged red in Products**
   ("⚠ N products need details") until someone opens it, fills the gaps and taps Save.
 - If a similar product already exists, it is suggested so you don't create duplicates.
+
+## Hindi screens (v2.3)
+
+Settings → **भाषा / Language** → हिंदी (per phone; also on the sign-in screen). Customer/product names, typed text,
+and the bill itself (screen receipt, print image, WhatsApp text) stay as they are. To change a Hindi word, edit `js/i18n.js`.
 
 ## Data notes
 

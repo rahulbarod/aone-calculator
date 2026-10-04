@@ -3,8 +3,9 @@ import { db as legacyDb } from './db.js';
 import { voice } from './voice.js';
 import { scale } from './scale.js';
 import { parseProductSpeech } from './parse.js';
+import { startHindi } from './i18n.js';
 
-const APP_VERSION = '2.2.2';
+const APP_VERSION = '2.3.0';
 
 // ---------------------------------------------------------------- constants
 const UNITS = {
@@ -480,6 +481,14 @@ function billCard(b) {
   </button>`;
 }
 
+// Screen language for this phone. Bills, receipts and shared text stay in English.
+const langSwitch = () => {
+  const l = local.get('lang', 'en');
+  return `<section class="card" data-raw><h2>भाषा / Language</h2>
+    <div class="seg sign"><button type="button" class="${l === 'en' ? 'on' : ''}" data-act="setLang" data-l="en">English</button>
+      <button type="button" class="${l === 'hi' ? 'on' : ''}" data-act="setLang" data-l="hi">हिंदी</button></div></section>`;
+};
+
 // ---------------------------------------------------------------- views: sign-in
 function viewLogin() {
   return `<header class="home-head"><div class="brand">A ONE ENTERPRISE</div><div class="today"><span>BILLING</span></div></header>
@@ -490,6 +499,7 @@ function viewLogin() {
       <button class="btn-big go" data-act="signIn">Sign in with Google</button>
       <p class="hint">${navigator.onLine ? 'After signing in once, the app also works without internet.' : '📴 You are offline. Connect to the internet once to sign in.'}</p>
     </div>
+    ${langSwitch()}
     ${cloud.emulator ? `<div class="card"><h2>Test sign-in (emulator)</h2>
       <input id="emuEmail" class="input big" placeholder="test@example.com" autocomplete="off">
       <button class="btn-mid" data-act="emuSignIn">Test sign-in</button></div>` : ''}
@@ -1229,6 +1239,7 @@ function viewSettings() {
   const counts = `${plural(S.products.length, 'product')} · ${plural(S.customers.length, 'customer')} · ${plural(S.bills.length, 'recent bill')}`;
   return `${topbar('Settings', '/')}
   <main class="page">
+    ${langSwitch()}
     <section class="card"><h2>Account & sync</h2>
       <p>Signed in as <b>${esc(S.user.email)}</b></p>
       <p><span class="sync-badge"></span></p>
@@ -1411,7 +1422,7 @@ function openQuickAdd(billId, name = '') {
     <label class="check"><input type="checkbox" id="qaSave" checked> Save this price in the catalogue</label>
     <div class="calc" id="qaCalc"></div>
     <p class="hint warn" id="qaMissing"></p>
-    <button type="button" class="btn-big go" id="qaGo" data-act="qaConfirm">ADD TO BILL</button>`);
+    <button type="button" class="btn-big go" id="qaGo" data-act="qaConfirm">ADD TO THIS BILL</button>`);
   updateQuick();
 }
 function readQuick() {
@@ -1455,6 +1466,12 @@ function fillQuick(text) {
 // ---------------------------------------------------------------- actions
 const A = {
   closeSheet: () => closeSheet(),
+
+  setLang(el) {
+    if (local.get('lang', 'en') === el.dataset.l) return;
+    local.set('lang', el.dataset.l);
+    location.reload();
+  },
 
   // --- account
   async signIn() {
@@ -2285,6 +2302,7 @@ async function checkLegacy() {
 }
 
 function init() {
+  if (local.get('lang', 'en') === 'hi') startHindi();
   cloud.onError = e => {
     console.error(e);
     if (e.code === 'permission-denied') {
