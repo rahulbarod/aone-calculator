@@ -1,4 +1,4 @@
-# A One Enterprise — Billing & Weight Calculator (v2.1, cloud sync)
+# A One Enterprise — Billing & Weight Calculator (v2.2, cloud sync)
 
 Offline-first PWA for counter billing. Plain HTML/CSS/JS, no build step.
 Products, customers and bills sync live between phones through Firebase (Firestore),
@@ -37,6 +37,7 @@ Phones get the new version the next time the app is opened twice.
 | `js/app.js` | Screens, billing logic, routing |
 | `js/cloud.js` | Firebase config, Google sign-in, live sync, offline cache |
 | `js/db.js` | Reads data saved by v1 (before sync) for the one-time upload |
+| `js/parse.js` | Understands spoken new-product lines ("thrust bearing 80 no. 365 rs") |
 | `js/voice.js` | Speech-to-text for customer names, with keyboard fallback |
 | `js/scale.js` | Weighing-machine adapter slot (manual entry for now) |
 | `sw.js` | Offline cache for the app files and Firebase library |
@@ -51,6 +52,15 @@ Phones get the new version the next time the app is opened twice.
 - **Dues** (home → 💰): who owes how much. Open a customer to see their statement and **Receive payment**
   (any amount — applied to the oldest unpaid bills first; Cash / UPI / Other). Payments can be deleted if entered by mistake.
 - Bills completed before v2.1 count as paid.
+
+## Adding new products while billing (v2.2)
+
+- On the Add item screen: **＋ NEW PRODUCT** or **🎤 SPEAK NEW** (or search for a name that doesn't exist → "Add … as new product").
+- Speak e.g. "thrust bearing 80 no. 365 rupees" → name, quantity, unit and price are filled in; check and tap ADD TO BILL.
+  "no./nos/number/nag/pcs" = pieces, "kilo/kg" = kg, "total 1200" = total amount instead of price per unit, "scrap" = deduct.
+- Only quantity and price are needed to bill. Missing unit (or price not saved to catalogue) → the product is **flagged red in Products**
+  ("⚠ N products need details") until someone opens it, fills the gaps and taps Save.
+- If a similar product already exists, it is suggested so you don't create duplicates.
 
 ## Data notes
 

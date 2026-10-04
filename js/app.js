@@ -2,8 +2,9 @@ import { cloud } from './cloud.js';
 import { db as legacyDb } from './db.js';
 import { voice } from './voice.js';
 import { scale } from './scale.js';
+import { parseProductSpeech } from './parse.js';
 
-const APP_VERSION = '2.1.0';
+const APP_VERSION = '2.2.0';
 
 // ---------------------------------------------------------------- constants
 const UNITS = {
@@ -13,6 +14,7 @@ const UNITS = {
   BOX: { label: 'box', name: 'BOX', decimal: false },
   METER: { label: 'm', name: 'METER', decimal: true },
   OTHER: { label: 'unit', name: 'OTHER', decimal: true },
+  UNSET: { label: '', name: '— NOT SET —', decimal: true }, // quick-added, to be completed later
 };
 const PRICE_TYPES = {
   PER_KG: { label: 'Per kg', per: 'kg' },
@@ -21,8 +23,9 @@ const PRICE_TYPES = {
   PER_BOX: { label: 'Per box', per: 'box' },
   PER_METER: { label: 'Per meter', per: 'm' },
   FIXED: { label: 'Fixed', per: '' },
+  UNSET: { label: '— Not set —', per: '' },
 };
-const UNIT_PRICE_TYPE = { KG: 'PER_KG', GRAM: 'PER_GRAM', PCS: 'PER_PIECE', BOX: 'PER_BOX', METER: 'PER_METER', OTHER: 'FIXED' };
+const UNIT_PRICE_TYPE = { KG: 'PER_KG', GRAM: 'PER_GRAM', PCS: 'PER_PIECE', BOX: 'PER_BOX', METER: 'PER_METER', OTHER: 'FIXED', UNSET: 'UNSET' };
 const CATEGORIES = { WEIGHT: 'Weight based', PIECE: 'Piece based', SCRAP: 'Scrap', OTHER: 'Other' };
 const CATEGORY_UNIT = { WEIGHT: 'KG', PIECE: 'PCS', SCRAP: 'KG', OTHER: 'PCS' };
 const VOICE_LANGS = {
@@ -120,8 +123,17 @@ function lineAmount(qty, rate, unit, priceType) {
   return round2(q * rate);
 }
 function lineCalcText(it) {
-  return `${fmtQty(it.quantity, it.unit)} ${unitLabel(it.unit, it.quantity)} × ${money(it.rate)}`;
+  return `${[fmtQty(it.quantity, it.unit), unitLabel(it.unit, it.quantity)].filter(Boolean).join(' ')} × ${money(it.rate)}`;
 }
+// Products added quickly while billing stay flagged until someone fills in the gaps.
+function missingInfo(p) {
+  if (!p.needsReview) return [];
+  const m = [];
+  if (p.unit === 'UNSET') m.push('unit');
+  if (!p.price) m.push('price');
+  return m;
+}
+const isIncomplete = p => missingInfo(p).length > 0;
 const fmtDate = iso => new Date(iso).toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' });
 const fmtTime = iso => new Date(iso).toLocaleTimeString('en-IN', { hour: 'numeric', minute: '2-digit' });
 const sameDay = (a, b) => new Date(a).toDateString() === new Date(b).toDateString();
@@ -492,6 +504,7 @@ function viewHome() {
   const act = activeBills();
   const t = todayStats();
   const due = totalDue();
+  const incomplete = S.products.filter(isIncomplete).length;
   return `
   <header class="home-head">
     <div class="brand">${esc(S.shop.shopName)}</div>
@@ -508,7 +521,7 @@ function viewHome() {
       <a class="tile" href="#/reports"><span class="ti">📊</span>REPORTS</a>
       <a class="tile ${due ? 'has-due' : ''}" href="#/dues"><span class="ti">💰</span>DUES<small>${due ? money(due) : 'None'}</small></a>
       <a class="tile" href="#/customers"><span class="ti">👤</span>CUSTOMERS</a>
-      <a class="tile" href="#/products"><span class="ti">📦</span>PRODUCTS</a>
+      <a class="tile ${incomplete ? 'has-inc' : ''}" href="#/products"><span class="ti">📦</span>PRODUCTS${incomplete ? `<small>⚠ ${incomplete} to check</small>` : ''}</a>
       <a class="tile" href="#/history"><span class="ti">🧾</span>HISTORY</a>
       <a class="tile" href="#/settings"><span class="ti">⚙️</span>SETTINGS</a>
     </nav>
@@ -574,6 +587,7 @@ function viewAddItem(bill) {
   return `${topbar(`Add item · ${esc(billName(bill))}`, `/bill/${bill.id}`)}
   <main class="page has-footer">
     <input id="prodSearch" class="input big" type="search" placeholder="🔍 Search product…" autocomplete="off" enterkeyhint="go">
+    <div class="btn-row"><button class="btn-mid newp" data-act="quickAdd">＋ NEW PRODUCT</button><button class="btn-mid newp" data-act="quickAddVoice">🎤 SPEAK NEW</button></div>
     <div id="prodResults">${productPickResults('')}</div>
   </main>
   <footer class="footbar">
@@ -586,14 +600,15 @@ function viewAddItem(bill) {
 }
 function ptile(p) {
   return `<button class="ptile ${p.price < 0 || p.category === 'SCRAP' ? 'neg' : ''}" data-act="pickProduct" data-id="${p.id}">
-    <span class="pt-name">${esc(p.name)}</span>
+    <span class="pt-name">${esc(p.name)}${isIncomplete(p) ? ' <i class="inc-dot" title="Details missing">!</i>' : ''}</span>
     <span class="pt-rate">${p.price ? rateText(p.price, p.priceType) : 'Enter rate'}</span></button>`;
 }
 function productPickResults(q) {
   const act = S.products.filter(p => p.active);
   if (q.trim()) {
     const m = searchProducts(act, q);
-    return m.length ? `<div class="ptiles">${m.map(ptile).join('')}</div>` : `<p class="empty">No product matches “${esc(q)}”</p>`;
+    const addNew = `<button class="btn-big alt" data-act="quickAdd" data-name="${esc(q.trim())}">＋ Add “${esc(q.trim())}” as new product</button>`;
+    return m.length ? `<div class="ptiles">${m.map(ptile).join('')}</div>${addNew}` : `<p class="empty">No product matches “${esc(q)}”</p>${addNew}`;
   }
   const byName = (a, b) => a.name.localeCompare(b.name);
   const favs = act.filter(p => p.favourite).sort(byName);
@@ -788,9 +803,13 @@ function viewCustomerForm(id) {
 }
 
 // --- products
+let reviewOnly = false;
 function viewProducts() {
+  const n = S.products.filter(isIncomplete).length;
+  if (!n) reviewOnly = false;
   return `${topbar('Products', '/', '<a class="tb-act" href="#/product/new">＋ Add</a>')}
   <main class="page">
+    ${n ? `<button class="review-banner ${reviewOnly ? 'on' : ''}" data-act="toggleReview">⚠ ${plural(n, 'product')} ${n === 1 ? 'needs' : 'need'} details<small>${reviewOnly ? 'Showing only these · tap to show all' : 'Added while billing · tap to see them'}</small></button>` : ''}
     <input id="prodAdminSearch" class="input big" type="search" placeholder="🔍 Product or SKU" autocomplete="off">
     <p class="hint">Tap ★ for quick items. Tap the price to change it.</p>
     <div id="prodAdminResults" class="list">${productAdminResults('')}</div>
@@ -800,16 +819,21 @@ function viewProducts() {
 function prow(p) {
   const neg = p.price < 0;
   const low = typeof p.stock === 'number' && typeof p.minStock === 'number' && p.stock <= p.minStock;
+  const missing = missingInfo(p);
   const info = [CATEGORIES[p.category], p.sku,
     typeof p.stock === 'number' ? `Stock: ${fmtQty(p.stock, p.unit)} ${unitLabel(p.unit, p.stock)}` : '',
     p.active ? '' : 'INACTIVE'].filter(Boolean).map(esc).join(' · ');
-  return `<div class="prow ${p.active ? '' : 'inactive'} ${neg ? 'negp' : ''}">
+  return `<div class="prow ${p.active ? '' : 'inactive'} ${neg ? 'negp' : ''} ${missing.length ? 'incomplete' : ''}">
     <button class="star ${p.favourite ? 'on' : ''}" data-act="toggleFav" data-id="${p.id}" aria-label="Favourite">★</button>
-    <a class="pr-main" href="#/product/${p.id}"><b>${esc(p.name)}</b><small>${info}${low ? ' <span class="low">⚠ LOW</span>' : ''}</small></a>
-    <button class="pr-price" data-act="editPrice" data-id="${p.id}">${p.price ? rateText(p.price, p.priceType) : 'At billing'}<small>EDIT PRICE</small></button>
+    <a class="pr-main" href="#/product/${p.id}"><b>${esc(p.name)}</b>${missing.length ? `<small class="inc-text">⚠ Missing: ${missing.join(', ')}</small>` : ''}<small>${info}${low ? ' <span class="low">⚠ LOW</span>' : ''}</small></a>
+    <button class="pr-price" data-act="editPrice" data-id="${p.id}">${p.price ? rateText(p.price, p.priceType) : p.needsReview ? 'Not set' : 'At billing'}<small>EDIT PRICE</small></button>
   </div>`;
 }
 function productAdminResults(q) {
+  if (reviewOnly) {
+    const list = S.products.filter(isIncomplete).sort(byTime('createdAt')).reverse();
+    return list.length ? list.map(prow).join('') : '<p class="empty">All products are complete 🎉</p>';
+  }
   if (q.trim()) {
     const m = searchProducts(S.products, q);
     return m.length ? m.map(prow).join('') : '<p class="empty">No match</p>';
@@ -827,8 +851,11 @@ function viewProductForm(id) {
   if (!p) return S.loaded.products ? go('/products', true) : '<div class="boot">Loading…</div>';
   const sign = p.price < 0 || (isNew && p.category === 'SCRAP') ? -1 : 1;
   const opts = (obj, sel, fn) => Object.entries(obj).map(([k, v]) => `<option value="${k}" ${k === sel ? 'selected' : ''}>${fn(v, k)}</option>`).join('');
+  const missing = missingInfo(p);
   return `${topbar(isNew ? 'New product' : 'Edit product', '/products')}
   <main class="page">
+    ${missing.length ? `<div class="card inc-card"><b>⚠ Details missing: ${missing.join(', ')}</b>
+      <p class="hint">Added while billing${p.addedBy ? ` by ${esc(p.addedBy)}` : ''} on ${fmtDate(p.createdAt)}. Fill in what you know and tap Save.</p></div>` : ''}
     <form id="prodForm" class="form" data-id="${isNew ? '' : p.id}" autocomplete="off">
       <label class="lbl" for="pfName">PRODUCT NAME *</label>
       <input id="pfName" name="name" class="input big" value="${esc(p.name)}" placeholder="e.g. Copper Wire">
@@ -1270,7 +1297,7 @@ function confirmBox({ title, body = '', ok = 'YES', cancel = 'NO', alt = null, d
 }
 
 // --- quantity / weight entry
-function openQtySheet(billId, productId, itemId = null) {
+function openQtySheet(billId, productId, itemId = null, presetQty = null) {
   const bill = getBill(billId);
   const item = itemId ? bill.items.find(i => i.id === itemId) : null;
   const p = item ? null : getProduct(productId);
@@ -1284,7 +1311,7 @@ function openQtySheet(billId, productId, itemId = null) {
   const needRate = !src.rate;
   const per = PRICE_TYPES[src.priceType]?.per;
   const u = UNITS[src.unit].label;
-  const startQty = item ? item.quantity : (src.allowDecimal ? '' : '1');
+  const startQty = item ? item.quantity : presetQty ?? (src.allowDecimal ? '' : '1');
   openSheet(`
     <div class="sheet-head ${neg ? 'neg' : ''}">
       <div><div class="sh-title">${esc(src.name)}${neg ? ' <span class="tag scrap">SCRAP</span>' : ''}</div>
@@ -1330,6 +1357,73 @@ function updateCalc() {
     out.innerHTML = `<span>${rate ? 'Enter ' + qtyWord(sheetCtx.unit).toLowerCase() : 'Enter rate'}</span><b>&nbsp;</b>`;
   }
   $('#qtyGo').disabled = !(q > 0 && rate);
+}
+
+// --- quick-add a product that isn't in the catalogue yet (while billing)
+const QA_UNITS = [['PCS', 'pcs'], ['KG', 'kg'], ['GRAM', 'g'], ['METER', 'm'], ['BOX', 'box'], ['', 'Not sure']];
+function openQuickAdd(billId, name = '') {
+  sheetCtx = { kind: 'quick', billId, unit: '', priceMode: 'each' };
+  openSheet(`
+    <div class="sheet-head"><div><div class="sh-title">New product</div><div class="sh-sub">Only name and price needed. The rest can be filled in later.</div></div>
+      <button type="button" class="x" data-act="closeSheet" aria-label="Close">✕</button></div>
+    <button type="button" class="btn-big speak" data-act="qaSpeak">🎤 SPEAK PRODUCT</button>
+    <p class="hint" id="qaHeard">Say e.g. “thrust bearing 80 no. 365 rupees”</p>
+    <label class="lbl" for="qaName">NAME</label>
+    <input id="qaName" class="input big" autocomplete="off" placeholder="Product name" value="${esc(name)}">
+    <div id="qaSimilar"></div>
+    <div class="two">
+      <div><label class="lbl" for="qaQty">QUANTITY</label><input id="qaQty" class="input big" inputmode="decimal" autocomplete="off" value="1"></div>
+      <div><label class="lbl" for="qaPrice">PRICE ₹</label><input id="qaPrice" class="input big" inputmode="decimal" autocomplete="off" placeholder="0"></div>
+    </div>
+    <label class="lbl">UNIT</label>
+    <div class="seg sign">${QA_UNITS.map(([u, l]) => `<button type="button" class="${u === '' ? 'on' : ''}" data-act="qaUnit" data-u="${u}">${l}</button>`).join('')}</div>
+    <div class="seg sign">
+      <button type="button" class="on" data-act="qaMode" data-m="each">Price per unit</button>
+      <button type="button" data-act="qaMode" data-m="total">Total amount</button>
+    </div>
+    <label class="check"><input type="checkbox" id="qaScrap"> − Scrap / buy-back (deduct from bill)</label>
+    <label class="check"><input type="checkbox" id="qaSave" checked> Save this price in the catalogue</label>
+    <div class="calc" id="qaCalc"></div>
+    <p class="hint warn" id="qaMissing"></p>
+    <button type="button" class="btn-big go" id="qaGo" data-act="qaConfirm">ADD TO BILL</button>`);
+  updateQuick();
+}
+function readQuick() {
+  const ctx = sheetCtx;
+  const qty = num($('#qaQty').value) || 0;
+  const price = num($('#qaPrice').value) || 0;
+  const sign = $('#qaScrap').checked ? -1 : 1;
+  const unit = ctx.unit || 'UNSET';
+  const total = ctx.priceMode === 'total';
+  const rate = total ? (qty ? round2(sign * price / qty) : 0) : sign * price;
+  const amount = total ? sign * price : round2(sign * price * qty);
+  return { name: $('#qaName').value.trim(), qty, price, unit, rate, amount, scrap: sign < 0, save: $('#qaSave').checked };
+}
+function updateQuick() {
+  if (sheetCtx?.kind !== 'quick') return;
+  const f = readQuick();
+  const ok = f.qty > 0 && f.price > 0;
+  $('#qaCalc').innerHTML = ok
+    ? `${[fmtQty(f.qty, f.unit), unitLabel(f.unit, f.qty)].filter(Boolean).join(' ')} × ${money(f.rate)}<b class="${f.amount < 0 ? 'neg-text' : ''}">= ${money(f.amount)}</b>`
+    : `<span>${f.price > 0 ? 'Enter quantity' : 'Enter price'}</span><b>&nbsp;</b>`;
+  const missing = [f.unit === 'UNSET' && 'unit (pcs / kg…)', !f.save && 'catalogue price', !f.name && 'name'].filter(Boolean);
+  $('#qaMissing').textContent = missing.length ? `⚠ Missing ${missing.join(', ')} — it will be flagged in Products so it can be completed later. Billing is not affected.` : '';
+  $('#qaGo').disabled = !ok;
+  // Already in the catalogue? Offer it instead of creating a duplicate.
+  const similar = f.name.length >= 3 ? searchProducts(S.products.filter(p => p.active), f.name.split(' ')[0]).slice(0, 3) : [];
+  $('#qaSimilar').innerHTML = similar.length ? `<p class="hint">Already in catalogue?</p><div class="chips wrap">${similar.map(p =>
+    `<button type="button" class="pchip" data-act="qaUseExisting" data-id="${p.id}">${esc(p.name)} · ${p.price ? rateText(p.price, p.priceType) : 'no price'}</button>`).join('')}</div>` : '';
+}
+function fillQuick(text) {
+  const r = parseProductSpeech(text);
+  $('#qaHeard').innerHTML = `Heard: “${esc(text)}”`;
+  if (r.name) $('#qaName').value = r.name;
+  if (r.qty) $('#qaQty').value = r.qty;
+  if (r.price) $('#qaPrice').value = r.price;
+  if (r.unit) A.qaUnit($(`[data-act="qaUnit"][data-u="${r.unit}"]`));
+  A.qaMode($(`[data-act="qaMode"][data-m="${r.priceMode}"]`));
+  $('#qaScrap').checked = r.scrap;
+  updateQuick();
 }
 
 // ---------------------------------------------------------------- actions
@@ -1424,6 +1518,81 @@ const A = {
       return setBillCustomer({ id: c.id, name, phone, type: 'REGULAR' });
     }
     setBillCustomer({ id: null, name, phone, type: 'ONE_OFF' });
+  },
+
+  // --- quick-add new product while billing
+  quickAdd(el) { openQuickAdd(R.b, el?.dataset.name || $('#prodSearch')?.value.trim() || ''); },
+  quickAddVoice() {
+    openQuickAdd(R.b);
+    A.qaSpeak($('[data-act="qaSpeak"]'));
+  },
+  async qaSpeak(el) {
+    if (!voice.supported) {
+      toast(voice.errorMessage('unsupported'));
+      return $('#qaName').focus();
+    }
+    if (el.classList.contains('listening')) return voice.stop();
+    el.classList.add('listening');
+    el.textContent = '🎤 Listening… speak now';
+    try {
+      fillQuick(await voice.listen(local.get('voiceLang', 'en-IN')));
+    } catch (err) {
+      toast(voice.errorMessage(err).replace('the name', 'the details'), 'err');
+    } finally {
+      el.classList.remove('listening');
+      el.textContent = '🎤 SPEAK AGAIN';
+    }
+  },
+  qaUnit(el) {
+    sheetCtx.unit = el.dataset.u;
+    el.parentElement.querySelectorAll('button').forEach(b => b.classList.toggle('on', b === el));
+    updateQuick();
+  },
+  qaMode(el) {
+    sheetCtx.priceMode = el.dataset.m;
+    el.parentElement.querySelectorAll('button').forEach(b => b.classList.toggle('on', b === el));
+    updateQuick();
+  },
+  qaUseExisting(el) {
+    const { billId } = sheetCtx;
+    const qty = num($('#qaQty').value) || null;
+    closeSheet(true);
+    openQtySheet(billId, el.dataset.id, null, qty);
+  },
+  qaConfirm() {
+    const ctx = sheetCtx;
+    const f = readQuick();
+    if (!(f.qty > 0 && f.price > 0)) return toast('Enter quantity and price', 'err');
+    const bill = getBill(ctx.billId);
+    if (!bill) return toast('This bill was closed on another phone', 'err');
+    const name = f.name || 'New item';
+    const category = f.scrap ? 'SCRAP' : ['KG', 'GRAM'].includes(f.unit) ? 'WEIGHT' : ['PCS', 'BOX'].includes(f.unit) ? 'PIECE' : 'OTHER';
+    const priceType = UNIT_PRICE_TYPE[f.unit];
+    const allowDecimal = f.unit === 'UNSET' || UNITS[f.unit].decimal;
+    // Same name already in the catalogue → reuse it rather than making a duplicate.
+    let p = S.products.find(x => x.name.toLowerCase() === name.toLowerCase());
+    if (p) {
+      if (f.save && !p.price) {
+        p.price = f.rate;
+        cloud.update('products', p.id, { price: f.rate, isNegative: f.rate < 0, updatedAt: now() });
+      }
+    } else {
+      p = makeProduct({ name, category, unit: f.unit, priceType, price: f.save ? f.rate : 0, allowDecimal });
+      Object.assign(p, { needsReview: true, addedBy: S.user.email, addedFrom: 'billing' });
+      S.products.push(p);
+      cloud.put('products', p);
+    }
+    putBillItem(bill, {
+      id: uid(), billId: bill.id, productId: p.id, productName: p.name, category: p.category,
+      unit: p.unit, priceType: p.priceType, allowDecimal: p.allowDecimal,
+      quantity: f.qty, rate: f.rate, amount: f.amount, isNegative: f.amount < 0, addedAt: now(), addedBy: S.user.email,
+    }, bill.status === 'DRAFT' ? { status: 'ACTIVE' } : {});
+    toast(`✓ Added ${p.name}  ${money(f.amount)}${isIncomplete(p) ? ' · flagged to complete later' : ''}`);
+    render(true);
+  },
+  toggleReview() {
+    reviewOnly = !reviewOnly;
+    render(true);
   },
 
   // --- items
@@ -1803,6 +1972,9 @@ const INPUTS = {
   qtyIn: updateCalc,
   rateIn: updateCalc,
   payIn: updatePayInfo,
+  qaName: updateQuick,
+  qaQty: updateQuick,
+  qaPrice: updateQuick,
 };
 document.addEventListener('input', e => INPUTS[e.target.id]?.(e.target.value));
 
@@ -1811,6 +1983,9 @@ const ENTER = {
   rateIn: () => A.confirmQty(),
   priceIn: () => A.savePrice(),
   payIn: () => A.savePayment(),
+  qaName: () => $('#qaQty').focus(),
+  qaQty: () => $('#qaPrice').focus(),
+  qaPrice: () => A.qaConfirm(),
   ooName: () => $('#ooPhone').focus(),
   ooPhone: () => A.confirmOneOff(),
   emuEmail: () => A.emuSignIn(),
@@ -1832,6 +2007,8 @@ document.addEventListener('change', async e => {
     S.shop[t.dataset.shop] = value;
     cloud.setMeta('shop', { [t.dataset.shop]: value });
     toast('✓ Saved for all phones');
+  } else if (t.id === 'qaScrap' || t.id === 'qaSave') {
+    updateQuick();
   } else if (t.dataset.rep) {
     rep[t.dataset.rep] = t.value;
     render(true);
@@ -1880,13 +2057,15 @@ document.addEventListener('submit', async e => {
     const mag = d.price ? num(d.price) : 0;
     if (isNaN(mag) || mag < 0) return toast('Enter a valid price', 'err');
     const optNum = v => (v === '' || v == null || isNaN(num(v)) ? null : num(v));
+    if (d.unit === 'UNSET') return toast('Choose the unit (pcs, kg…)', 'err');
+    if (d.priceType === 'UNSET') d.priceType = UNIT_PRICE_TYPE[d.unit];
     const existing = f.dataset.id ? getProduct(f.dataset.id) : null;
     const p = existing ? { ...existing } : makeProduct({ name, category: d.category });
     const price = Number(d.sign) * mag || 0;
     Object.assign(p, {
       name, category: d.category, unit: d.unit, priceType: d.priceType, price, isNegative: price < 0,
       sku: (d.sku || '').trim(), stock: optNum(d.stock), minStock: optNum(d.minStock),
-      allowDecimal: !!d.allowDecimal, favourite: !!d.favourite, active: !!d.active, updatedAt: now(),
+      allowDecimal: !!d.allowDecimal, favourite: !!d.favourite, active: !!d.active, updatedAt: now(), needsReview: false,
     });
     S.products = S.products.filter(x => x.id !== p.id).concat(p);
     cloud.put('products', p);

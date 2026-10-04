@@ -363,3 +363,22 @@ textarea.input { resize: vertical; }
   #receipt, #receipt * { visibility: visible; }
   #receipt { position: absolute; left: 0; top: 0; width: 100%; border: 0; }
 }
+
+/* ---------- quick-add & incomplete products ---------- */
+:root { --inc: #c2410c; --inc-bg: #fff1eb; --inc-line: #fdba9b; }
+.btn-mid.newp { border-style: dashed; border-color: var(--brand-2); color: var(--brand); background: #f3f8fd; }
+.btn-big.speak { background: var(--brand); }
+.btn-big.speak.listening { background: var(--neg); animation: pulse 1s infinite; }
+.chips.wrap { flex-wrap: wrap; margin: 0; padding: 0; overflow: visible; }
+.chips.wrap .pchip { min-height: 40px; font-size: 14px; }
+.inc-dot { display: inline-grid; place-items: center; width: 20px; height: 20px; border-radius: 50%; background: var(--inc); color: #fff; font-style: normal; font-size: 13px; font-weight: 900; vertical-align: 2px; }
+.prow.incomplete { border-color: var(--inc-line); background: var(--inc-bg); box-shadow: inset 6px 0 0 var(--inc); }
+.prow.incomplete .pr-price { background: transparent; }
+.inc-text { color: var(--inc) !important; font-weight: 800; }
+.review-banner { display: flex; flex-direction: column; align-items: flex-start; gap: 2px; width: 100%; padding: 12px 14px; border-radius: var(--r); background: var(--inc-bg); border: 2px solid var(--inc-line); color: var(--inc); font-weight: 900; font-size: 17px; text-align: left; }
+.review-banner small { color: var(--inc); font-weight: 700; }
+.review-banner.on { background: var(--inc); color: #fff; }
+.review-banner.on small { color: #ffe4d6; }
+.card.inc-card { border-color: var(--inc-line); background: var(--inc-bg); color: var(--inc); }
+.tile.has-inc { border-color: var(--inc-line); background: var(--inc-bg); }
+.tile.has-inc small { color: var(--inc); }
