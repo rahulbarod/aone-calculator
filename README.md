@@ -1,4 +1,4 @@
-# A One Enterprise — Billing & Weight Calculator (v2, cloud sync)
+# A One Enterprise — Billing & Weight Calculator (v2.1, cloud sync)
 
 Offline-first PWA for counter billing. Plain HTML/CSS/JS, no build step.
 Products, customers and bills sync live between phones through Firebase (Firestore),
@@ -42,6 +42,15 @@ Phones get the new version the next time the app is opened twice.
 | `sw.js` | Offline cache for the app files and Firebase library |
 | `firestore.rules` | Security rules — who may access the data |
 | `manifest.json`, `icons/` | Install / home-screen icon |
+
+## Reports & dues (v2.1)
+
+- **Reports** (home → 📊): Today / Yesterday / This week / This month / Last month / Custom range.
+  Summary (net sales, items sold, scrap, cash received, still due, by-day chart), by product, by customer. 📤 shares the summary as text.
+- **Completing a bill**: ✓ PAID (default) or PAY LATER (DUE).
+- **Dues** (home → 💰): who owes how much. Open a customer to see their statement and **Receive payment**
+  (any amount — applied to the oldest unpaid bills first; Cash / UPI / Other). Payments can be deleted if entered by mistake.
+- Bills completed before v2.1 count as paid.
 
 ## Data notes
 

@@ -3,7 +3,7 @@ import { db as legacyDb } from './db.js';
 import { voice } from './voice.js';
 import { scale } from './scale.js';
 
-const APP_VERSION = '2.0.0';
+const APP_VERSION = '2.1.0';
 
 // ---------------------------------------------------------------- constants
 const UNITS = {
@@ -180,24 +180,40 @@ function sampleToProduct([name, category, unit, price, favourite, stock]) {
   return makeProduct({ name, category, unit, price, favourite, stock, minStock: stock != null ? 10 : null });
 }
 
-// Bills are stored with items as a map (see cloud.js); the app uses an array.
+// Bills are stored with items and payments as maps (see cloud.js); the app uses arrays.
+const byTime = key => (x, y) => (x[key] || '').localeCompare(y[key] || '');
 function billFromDoc(d) {
-  const items = Array.isArray(d.items) ? d.items : Object.values(d.items || {});
-  const b = { ...d, items: items.sort((x, y) => (x.addedAt || '').localeCompare(y.addedAt || '')) };
+  const list = v => (Array.isArray(v) ? v : Object.values(v || {}));
+  const b = {
+    ...d,
+    items: list(d.items).sort(byTime('addedAt')),
+    payments: list(d.payments).sort(byTime('at')),
+    // Bills completed before payment tracking existed count as paid.
+    legacyPaid: d.status === 'COMPLETED' && !('settled' in d),
+  };
   recalc(b, false);
   return b;
 }
 function billToDoc(b) {
-  return { ...b, items: Object.fromEntries(b.items.map(i => [i.id, i])) };
+  const { legacyPaid, ...rest } = b;
+  return { ...rest, items: Object.fromEntries(b.items.map(i => [i.id, i])), payments: Object.fromEntries((b.payments || []).map(p => [p.id, p])) };
 }
 function recalc(b, touch = true) {
   b.subtotal = round2(b.items.reduce((s, i) => s + i.amount, 0));
   b.total = b.subtotal; // room for discount / GST later
+  b.payments = b.payments || [];
+  b.paid = b.legacyPaid ? b.total : round2(b.payments.reduce((s, p) => s + p.amount, 0));
+  b.balance = round2(b.total - b.paid);
+  b.isSettled = Math.abs(b.balance) < 0.005;
   if (touch) b.updatedAt = now();
 }
 const totalsOf = b => {
   recalc(b);
   return { subtotal: b.subtotal, total: b.total, updatedAt: b.updatedAt };
+};
+const payStateOf = b => {
+  recalc(b);
+  return { paid: b.paid, balance: b.balance, settled: b.isSettled, settledAt: b.isSettled ? (b.settledAt || now()) : null, updatedAt: b.updatedAt };
 };
 function updateBill(b, fields) {
   Object.assign(b, fields);
@@ -208,12 +224,39 @@ function putBillItem(b, item, fields = {}) {
   if (i >= 0) b.items[i] = item;
   else b.items.push(item);
   Object.assign(b, fields);
-  cloud.setBillItem(b.id, item, { ...fields, ...totalsOf(b) });
+  cloud.setBillEntry(b.id, 'items', item, { ...fields, ...totalsOf(b) });
 }
 function dropBillItem(b, itemId) {
   b.items = b.items.filter(i => i.id !== itemId);
-  cloud.removeBillItem(b.id, itemId, totalsOf(b));
+  cloud.removeBillEntry(b.id, 'items', itemId, totalsOf(b));
 }
+// amount > 0 = money received; < 0 = money paid out (scrap worth more than the purchase).
+function addPayment(b, amount, method) {
+  const p = { id: uid(), amount: round2(amount), method, at: now(), by: S.user.email };
+  b.payments = [...(b.payments || []), p];
+  cloud.setBillEntry(b.id, 'payments', p, payStateOf(b));
+  return p;
+}
+function removePayment(b, paymentId) {
+  b.payments = b.payments.filter(p => p.id !== paymentId);
+  cloud.removeBillEntry(b.id, 'payments', paymentId, payStateOf(b));
+}
+// Dues: completed bills with money still owed, grouped by customer.
+const custKey = b => b.customerId || (b.customerName ? 'n:' + b.customerName.trim().toLowerCase() : 'walkin');
+const custKeyName = (key, b) => getCustomer(key)?.name || b?.customerName || 'Walk-in customers';
+const unpaidBills = () => allBills().filter(b => b.status === 'COMPLETED' && !b.isSettled).sort(byTime('completedAt'));
+function duesByCustomer() {
+  const map = new Map();
+  for (const b of unpaidBills()) {
+    const k = custKey(b);
+    const g = map.get(k) || { key: k, name: custKeyName(k, b), bills: [], balance: 0 };
+    g.bills.push(b);
+    g.balance = round2(g.balance + b.balance);
+    map.set(k, g);
+  }
+  return [...map.values()].sort((a, b) => b.balance - a.balance);
+}
+const totalDue = () => round2(unpaidBills().reduce((s, b) => s + b.balance, 0));
 function deleteBill(b) {
   S.bills = S.bills.filter(x => x.id !== b.id);
   cloud.remove('bills', b.id);
@@ -281,7 +324,18 @@ let unsubscribe = null;
 function onData(name, rows, meta) {
   if (name === 'products') S.products = rows;
   else if (name === 'customers') S.customers = rows;
-  else if (name === 'bills') S.bills = rows.map(billFromDoc);
+  else if (name === 'bills') {
+    S.bills = rows.map(billFromDoc);
+    // Two phones recording payments at the same moment can leave the stored
+    // "settled" flag out of date; whichever phone notices fixes it.
+    if (!meta.fromCache && !meta.pending) {
+      for (const b of S.bills) {
+        if (b.status === 'COMPLETED' && !b.legacyPaid && b.settled !== b.isSettled) {
+          cloud.update('bills', b.id, { paid: b.paid, balance: b.balance, settled: b.isSettled });
+        }
+      }
+    }
+  }
   else if (name === 'meta') {
     const { id, ...shop } = rows.find(r => r.id === 'shop') || {};
     S.shop = { ...DEFAULT_SHOP, ...shop };
@@ -289,11 +343,12 @@ function onData(name, rows, meta) {
     S.counters = counters;
   }
   const first = !S.loaded[name];
+  const firstFromServer = !meta.fromCache && !S.fromServer[name];
   S.loaded[name] = true;
   if (!meta.fromCache) S.fromServer[name] = true;
   S.pending[name] = meta.pending;
   updateSyncBadge();
-  if (meta.dataChanged || first) scheduleRender();
+  if (meta.dataChanged || first || firstFromServer) scheduleRender();
 }
 
 function syncState() {
@@ -352,6 +407,8 @@ function render(keepScroll = false) {
   window.scrollTo(0, keepScroll ? y : 0);
   updateSyncBadge();
   if (a === 'settings') fillStorageInfo();
+  const chip = $('.pchip.on');
+  if (chip) chip.parentElement.scrollLeft = chip.offsetLeft - 60;
 }
 
 function route(a, b, c) {
@@ -376,6 +433,9 @@ function route(a, b, c) {
       return bill ? viewReceipt(bill, a === 'done' ? '/' : '/history') : go('/history', true);
     }
     case 'history': return viewHistory();
+    case 'reports': return b === 'product' ? viewProductReport(decodeURIComponent(c)) : viewReports();
+    case 'dues': return viewDues();
+    case 'statement': return viewStatement(decodeURIComponent(b));
     case 'customers': return viewCustomers();
     case 'customer': return viewCustomerForm(b);
     case 'products': return viewProducts();
@@ -431,6 +491,7 @@ function viewHome() {
   purgeEmptyDrafts();
   const act = activeBills();
   const t = todayStats();
+  const due = totalDue();
   return `
   <header class="home-head">
     <div class="brand">${esc(S.shop.shopName)}</div>
@@ -444,6 +505,8 @@ function viewHome() {
     ${act.length ? `<div class="list">${act.slice(0, 6).map(billCard).join('')}</div>` : '<p class="empty">No open bills right now</p>'}
     ${act.length > 6 ? `<a class="btn-text" href="#/bills">+${act.length - 6} more bills</a>` : ''}
     <nav class="grid2">
+      <a class="tile" href="#/reports"><span class="ti">📊</span>REPORTS</a>
+      <a class="tile ${due ? 'has-due' : ''}" href="#/dues"><span class="ti">💰</span>DUES<small>${due ? money(due) : 'None'}</small></a>
       <a class="tile" href="#/customers"><span class="ti">👤</span>CUSTOMERS</a>
       <a class="tile" href="#/products"><span class="ti">📦</span>PRODUCTS</a>
       <a class="tile" href="#/history"><span class="ti">🧾</span>HISTORY</a>
@@ -596,9 +659,22 @@ function receiptHtml(b) {
     <div class="r-items">${b.items.map(it => `<div class="r-item ${it.amount < 0 ? 'neg' : ''}">
       <div class="r-name">${esc(it.productName)}${it.amount < 0 ? ' <span class="tag scrap">SCRAP</span>' : ''}</div>
       <div class="r-line"><span>${lineCalcText(it)}</span><b>${money(it.amount)}</b></div></div>`).join('')}</div>
-    <div class="r-total"><span>${b.total < 0 ? 'PAID TO CUSTOMER' : 'TOTAL'}</span>${b.status === 'CANCELLED' ? '<i class="stamp">CANCELLED</i>' : b.status === 'COMPLETED' ? '<i class="stamp ok">DONE</i>' : ''}<b>${money(Math.abs(b.total))}</b></div>
+    <div class="r-total"><span>${b.total < 0 ? 'TO CUSTOMER' : 'TOTAL'}</span>${b.status === 'CANCELLED' ? '<i class="stamp">CANCELLED</i>' : b.status !== 'COMPLETED' ? '' : b.isSettled ? '<i class="stamp ok">PAID</i>' : '<i class="stamp due">DUE</i>'}<b>${money(Math.abs(b.total))}</b></div>
+    ${b.status === 'COMPLETED' && (b.payments.length > 1 || !b.isSettled) ? `<div class="r-pay">
+      ${b.payments.map(p => `<div><span>${p.amount < 0 ? 'Paid out' : 'Received'} · ${fmtDate(p.at)}${p.method ? ' · ' + esc(p.method) : ''}</span><b>${money(Math.abs(p.amount))}</b></div>`).join('')}
+      ${b.isSettled ? '' : `<div class="r-bal"><span>BALANCE ${b.balance < 0 ? 'TO PAY CUSTOMER' : 'DUE'}</span><b>${money(Math.abs(b.balance))}</b></div>`}
+    </div>` : ''}
     <div class="r-foot">${plural(b.items.length, 'item')} · Thank you!</div>
   </article>`;
+}
+function paymentsPanel(b) {
+  if (b.status !== 'COMPLETED' || b.legacyPaid) return '';
+  return `<section class="card"><h2>Payments</h2>
+    ${b.payments.length ? b.payments.map(p => `<div class="pay-row"><span><b>${money(Math.abs(p.amount))}</b> ${p.amount < 0 ? 'paid out' : 'received'}<small>${fmtDate(p.at)}, ${fmtTime(p.at)}${p.method ? ' · ' + esc(p.method) : ''}</small></span>
+      <button class="x" data-act="deletePayment" data-bill="${b.id}" data-id="${p.id}" aria-label="Delete payment">✕</button></div>`).join('') : '<p class="hint">No payment yet.</p>'}
+    ${b.isSettled ? '<p class="settled-note">✓ Fully settled</p>' : `<p class="due-note">Balance ${b.balance < 0 ? 'to pay customer' : 'due'}: <b>${money(Math.abs(b.balance))}</b></p>
+      <button class="btn-big go" data-act="payBill" data-id="${b.id}">${b.balance < 0 ? 'RECORD PAYOUT' : '₹ RECEIVE PAYMENT'}</button>`}
+  </section>`;
 }
 function receiptText(b) {
   const when = b.completedAt || b.updatedAt;
@@ -609,7 +685,8 @@ function receiptText(b) {
     '------------------------------',
     ...b.items.map(it => `${it.productName}\n  ${lineCalcText(it)} = ${money(it.amount)}`),
     '------------------------------',
-    `${b.total < 0 ? 'PAID TO CUSTOMER' : 'TOTAL'}: ${money(Math.abs(b.total))}`,
+    `${b.total < 0 ? 'TO CUSTOMER' : 'TOTAL'}: ${money(Math.abs(b.total))}`,
+    b.status === 'COMPLETED' && !b.isSettled && `Paid: ${money(Math.abs(b.paid))}\nBALANCE DUE: ${money(Math.abs(b.balance))}`,
     b.status === 'CANCELLED' ? '*** CANCELLED ***' : 'Thank you!',
   ];
   return lines.filter(Boolean).join('\n');
@@ -618,6 +695,7 @@ function viewReceipt(bill, back) {
   return `${topbar(`Bill ${billLabel(bill)}`, back, `<span class="status">${bill.status}</span>`)}
   <main class="page">
     ${receiptHtml(bill)}
+    ${paymentsPanel(bill)}
     <div class="btn-row">
       <button class="btn-mid" data-act="shareBill" data-id="${bill.id}">📤 SHARE</button>
       <button class="btn-mid" data-act="printBill">🖨 PRINT</button>
@@ -657,7 +735,7 @@ function historyResults(q) {
     return `<div class="day-head"><span>${g.d}</span><span>${plural(done.length, 'bill')} · ${money(total)}</span></div>
     <div class="list">${g.bills.map(b => `<button class="hrow ${b.status === 'CANCELLED' ? 'cancelled' : ''}" data-act="openReceipt" data-id="${b.id}">
       <span class="h-time">${fmtTime(when(b))}</span>
-      <span class="h-main"><b>${esc(billName(b))}</b><small>${plural(b.items.length, 'item')} · ${billLabel(b)}${b.status === 'CANCELLED' ? ' · <span class="tag cancel">CANCELLED</span>' : ''}</small></span>
+      <span class="h-main"><b>${esc(billName(b))}</b><small>${plural(b.items.length, 'item')} · ${billLabel(b)}${b.status === 'CANCELLED' ? ' · <span class="tag cancel">CANCELLED</span>' : !b.isSettled ? ` · <span class="tag due">DUE ${money(Math.abs(b.balance))}</span>` : ''}</small></span>
       <span class="h-amt ${b.total < 0 ? 'neg-text' : ''}">${money(b.total)}</span></button>`).join('')}</div>`;
   }).join('');
 }
@@ -677,8 +755,10 @@ function viewCustomers() {
 function customerAdminResults(q) {
   const list = searchCustomers(q);
   if (!list.length) return `<p class="empty">${q ? 'No match' : 'No customers yet'}</p>`;
-  return `<div class="sec-label">${plural(list.length, 'customer')}</div>` + list.map(c => `<a class="row" href="#/customer/${c.id}">
-    <span class="row-main"><b>${esc(c.name)}</b><small>${esc([c.phone, c.type === 'ONE_OFF' ? 'One-off' : '', c.address].filter(Boolean).join(' · ')) || '&nbsp;'}</small></span><span class="chev">›</span></a>`).join('');
+  const dues = new Map(duesByCustomer().map(g => [g.key, g.balance]));
+  return `<div class="sec-label">${plural(list.length, 'customer')}</div>` + list.map(c => `<a class="row" href="#/statement/${c.id}">
+    <span class="row-main"><b>${esc(c.name)}</b><small>${esc([c.phone, c.type === 'ONE_OFF' ? 'One-off' : '', c.address].filter(Boolean).join(' · ')) || '&nbsp;'}</small></span>
+    ${dues.get(c.id) ? `<span class="due-amt">DUE<b>${money(dues.get(c.id))}</b></span>` : ''}<span class="chev">›</span></a>`).join('');
 }
 function viewCustomerForm(id) {
   const isNew = id === 'new';
@@ -780,6 +860,315 @@ function viewProductForm(id) {
   </main>`;
 }
 
+// --- reports
+const PERIODS = { today: 'Today', yesterday: 'Yesterday', week: 'This week', month: 'This month', lastmonth: 'Last month', custom: 'Custom' };
+const rep = { period: 'today', from: '', to: '', tab: 'summary', loading: false, offline: false };
+const pad2 = n => String(n).padStart(2, '0');
+const dayKey = x => {
+  const d = new Date(x);
+  return `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`;
+};
+const addDays = (d, n) => {
+  const x = new Date(d);
+  x.setDate(x.getDate() + n);
+  return x;
+};
+function periodRange() {
+  const d = new Date();
+  d.setHours(0, 0, 0, 0);
+  let from;
+  let to;
+  switch (rep.period) {
+    case 'yesterday': from = addDays(d, -1); to = d; break;
+    case 'week': from = addDays(d, -((d.getDay() + 6) % 7)); to = addDays(from, 7); break; // Monday start
+    case 'month': from = new Date(d.getFullYear(), d.getMonth(), 1); to = new Date(d.getFullYear(), d.getMonth() + 1, 1); break;
+    case 'lastmonth': from = new Date(d.getFullYear(), d.getMonth() - 1, 1); to = new Date(d.getFullYear(), d.getMonth(), 1); break;
+    case 'custom':
+      from = rep.from ? new Date(rep.from + 'T00:00') : addDays(d, -6);
+      to = addDays(rep.to ? new Date(rep.to + 'T00:00') : d, 1);
+      break;
+    default: from = d; to = addDays(d, 1);
+  }
+  const last = addDays(to, -1);
+  const label = dayKey(from) === dayKey(last) ? fmtDate(from) : `${fmtDate(from)} – ${fmtDate(last)}`;
+  return { from: from.toISOString(), to: to.toISOString(), fromD: from, toD: to, label };
+}
+// Bills older than the live window are fetched once per range when needed.
+const fetchedRanges = new Set();
+function ensureRange(r) {
+  rep.offline = false;
+  if (r.from >= recentCutoff() || fetchedRanges.has(r.from + r.to)) return;
+  if (!navigator.onLine) {
+    rep.offline = true;
+    return;
+  }
+  fetchedRanges.add(r.from + r.to);
+  rep.loading = true;
+  cloud.loadBillsCompletedBetween(r.from, r.to).then(rows => {
+    const fresh = rows.map(billFromDoc);
+    const ids = new Set(fresh.map(b => b.id));
+    S.olderBills = S.olderBills.filter(b => !ids.has(b.id)).concat(fresh);
+    rep.loading = false;
+    render(true);
+  }).catch(e => {
+    fetchedRanges.delete(r.from + r.to);
+    rep.loading = false;
+    toast('Could not load older bills: ' + e.message, 'err');
+    render(true);
+  });
+}
+const billsIn = r => allBills().filter(b => b.status === 'COMPLETED' && b.completedAt >= r.from && b.completedAt < r.to);
+
+function summarize(bills, r) {
+  let sales = 0, scrap = 0, scrapKg = 0;
+  for (const b of bills) for (const it of b.items) {
+    if (it.amount >= 0) sales += it.amount;
+    else {
+      scrap += it.amount;
+      if (it.unit === 'KG') scrapKg += it.quantity;
+    }
+  }
+  const net = round2(bills.reduce((s, b) => s + b.total, 0));
+  const pays = allBills().flatMap(b => b.payments || []).filter(p => p.at >= r.from && p.at < r.to);
+  return {
+    count: bills.length, net, sales: round2(sales), scrap: round2(scrap), scrapKg: round3(scrapKg),
+    avg: bills.length ? round2(net / bills.length) : 0,
+    received: round2(pays.filter(p => p.amount > 0).reduce((s, p) => s + p.amount, 0)),
+    paidOut: round2(pays.filter(p => p.amount < 0).reduce((s, p) => s + p.amount, 0)),
+    dueFromPeriod: round2(bills.filter(b => !b.isSettled).reduce((s, b) => s + b.balance, 0)),
+  };
+}
+function productStats(bills) {
+  const map = new Map();
+  for (const b of bills) for (const it of b.items) {
+    const key = it.productId || 'n:' + it.productName.toLowerCase();
+    const e = map.get(key) || { key, name: it.productName, unit: it.unit, qty: 0, amount: 0, bills: new Set() };
+    if (e.unit === it.unit) e.qty = round3(e.qty + it.quantity);
+    e.amount = round2(e.amount + it.amount);
+    e.bills.add(b.id);
+    map.set(key, e);
+  }
+  return [...map.values()].sort((a, b) => Math.abs(b.amount) - Math.abs(a.amount));
+}
+function customerStats(bills) {
+  const map = new Map();
+  const dues = new Map(duesByCustomer().map(g => [g.key, g.balance]));
+  for (const b of bills) {
+    const key = custKey(b);
+    const e = map.get(key) || { key, name: custKeyName(key, b), bills: 0, net: 0, due: dues.get(key) || 0 };
+    e.bills++;
+    e.net = round2(e.net + b.total);
+    map.set(key, e);
+  }
+  return [...map.values()].sort((a, b) => b.net - a.net);
+}
+// Per-day (or per-month for long ranges) totals for a simple bar chart.
+function series(r, valueOf) {
+  const days = Math.round((r.toD - r.fromD) / 864e5);
+  const monthly = days > 62;
+  const buckets = new Map();
+  const end = new Date(Math.min(r.toD, addDays(new Date().setHours(0, 0, 0, 0), 1))); // no future days
+  for (let d = new Date(r.fromD); d < end; d = monthly ? new Date(d.getFullYear(), d.getMonth() + 1, 1) : addDays(d, 1)) {
+    const k = monthly ? dayKey(d).slice(0, 7) : dayKey(d);
+    buckets.set(k, { label: monthly ? d.toLocaleDateString('en-IN', { month: 'short', year: '2-digit' }) : d.toLocaleDateString('en-IN', { weekday: 'short', day: '2-digit' }), value: 0 });
+  }
+  return { monthly, buckets, add(iso, v) {
+    const k = monthly ? dayKey(iso).slice(0, 7) : dayKey(iso);
+    if (buckets.has(k)) buckets.get(k).value = round3(buckets.get(k).value + v);
+  } };
+}
+function bars(rows, fmt) {
+  const max = Math.max(1e-9, ...rows.map(r => Math.abs(r.value)));
+  return `<div class="bars">${rows.map(r => `<div class="bar-row"><span class="bar-lbl">${esc(r.label)}</span>
+    <span class="bar"><i class="${r.value < 0 ? 'neg' : ''}" style="width:${Math.round(Math.abs(r.value) / max * 100)}%"></i></span><b class="${r.value < 0 ? 'neg-text' : ''}">${fmt(r.value)}</b></div>`).join('')}</div>`;
+}
+function periodPicker() {
+  return `<nav class="chips">${Object.entries(PERIODS).map(([k, v]) => `<button class="pchip ${rep.period === k ? 'on' : ''}" data-act="setPeriod" data-p="${k}">${v}</button>`).join('')}</nav>
+    ${rep.period === 'custom' ? `<div class="two"><div><label class="lbl" for="repFrom">FROM</label><input id="repFrom" type="date" class="input big" data-rep="from" value="${rep.from}"></div>
+      <div><label class="lbl" for="repTo">TO</label><input id="repTo" type="date" class="input big" data-rep="to" value="${rep.to}"></div></div>` : ''}`;
+}
+function rangeNote(r) {
+  return `<p class="range-lbl">${r.label}${rep.loading ? ' · <i>loading older bills…</i>' : ''}</p>
+    ${rep.offline ? '<p class="hint warn">📴 Offline — older bills for this period can\'t be loaded, totals may be incomplete.</p>' : ''}`;
+}
+function viewReports() {
+  const r = periodRange();
+  ensureRange(r);
+  const bills = billsIn(r);
+  const s = summarize(bills, r);
+  const prods = productStats(bills);
+  const custs = customerStats(bills);
+  const tab = rep.tab;
+  let body;
+  if (tab === 'products') {
+    const sold = prods.filter(p => p.amount >= 0);
+    const scrap = prods.filter(p => p.amount < 0);
+    const row = p => `<a class="rep-row ${p.amount < 0 ? 'neg' : ''}" href="#/reports/product/${encodeURIComponent(p.key)}">
+      <span class="row-main"><b>${esc(p.name)}</b><small>${fmtQty(p.qty, p.unit)} ${unitLabel(p.unit, p.qty)} · ${plural(p.bills.size, 'bill')}</small></span>
+      <b class="${p.amount < 0 ? 'neg-text' : ''}">${money(p.amount)}</b><span class="chev">›</span></a>`;
+    body = (sold.length ? `<div class="sec-label">SOLD</div><div class="list">${sold.map(row).join('')}</div>` : '') +
+      (scrap.length ? `<div class="sec-label">SCRAP / BUY-BACK</div><div class="list">${scrap.map(row).join('')}</div>` : '') ||
+      '<p class="empty">No sales in this period</p>';
+  } else if (tab === 'customers') {
+    body = custs.length ? `<div class="list">${custs.map(c => `<a class="rep-row" href="#/statement/${encodeURIComponent(c.key)}">
+      <span class="row-main"><b>${esc(c.name)}</b><small>${plural(c.bills, 'bill')}${c.due ? ` · <span class="tag due">DUE ${money(c.due)}</span>` : ''}</small></span>
+      <b>${money(c.net)}</b><span class="chev">›</span></a>`).join('')}</div>` : '<p class="empty">No sales in this period</p>';
+  } else {
+    const ser = series(r, null);
+    bills.forEach(b => ser.add(b.completedAt, b.total));
+    const multi = ser.buckets.size > 1;
+    body = `<div class="stats">
+        <div class="stat big"><span>NET SALES</span><b class="${s.net < 0 ? 'neg-text' : ''}">${money(s.net)}</b><small>${plural(s.count, 'bill')} · avg ${money(s.avg)}</small></div>
+        <div class="stat"><span>ITEMS SOLD</span><b>${money(s.sales)}</b></div>
+        <div class="stat"><span>SCRAP / RETURN</span><b class="neg-text">${money(s.scrap)}</b>${s.scrapKg ? `<small>${fmtQty(s.scrapKg, 'KG')} kg</small>` : ''}</div>
+        <div class="stat"><span>CASH RECEIVED</span><b>${money(s.received)}</b>${s.paidOut ? `<small>paid out ${money(Math.abs(s.paidOut))}</small>` : ''}</div>
+        <div class="stat"><span>STILL DUE</span><b class="${s.dueFromPeriod ? 'due-text' : ''}">${money(s.dueFromPeriod)}</b><small>from these bills</small></div>
+      </div>
+      <a class="row" href="#/dues"><span class="row-main"><b>All dues today: ${money(totalDue())}</b><small>${plural(duesByCustomer().length, 'customer')} owe money</small></span><span class="chev">›</span></a>
+      ${multi ? `<div class="sec-label">${ser.monthly ? 'BY MONTH' : 'BY DAY'}</div>${bars([...ser.buckets.values()], money)}` : ''}
+      ${prods.length ? `<div class="sec-label">TOP PRODUCTS <button class="link" data-act="setTab" data-t="products">See all</button></div>
+        ${bars(prods.filter(p => p.amount > 0).slice(0, 5).map(p => ({ label: p.name, value: p.amount })), money)}` : ''}
+      ${custs.length ? `<div class="sec-label">TOP CUSTOMERS <button class="link" data-act="setTab" data-t="customers">See all</button></div>
+        ${bars(custs.slice(0, 5).map(c => ({ label: c.name, value: c.net })), money)}` : ''}`;
+  }
+  return `${topbar('Reports', '/', '<button class="tb-act" data-act="shareReport">📤 Share</button>')}
+  <main class="page">
+    ${periodPicker()}
+    ${rangeNote(r)}
+    <div class="seg tabs">${[['summary', 'Summary'], ['products', 'Products'], ['customers', 'Customers']].map(([k, v]) => `<button type="button" class="${tab === k ? 'on' : ''}" data-act="setTab" data-t="${k}">${v}</button>`).join('')}</div>
+    ${body}
+  </main>`;
+}
+function reportText() {
+  const r = periodRange();
+  const bills = billsIn(r);
+  const s = summarize(bills, r);
+  const prods = productStats(bills);
+  return [
+    `${S.shop.shopName} — ${PERIODS[rep.period]} (${r.label})`,
+    `Net sales: ${money(s.net)} · ${plural(s.count, 'bill')}`,
+    `Items sold: ${money(s.sales)}`,
+    s.scrap ? `Scrap/return: ${money(s.scrap)}${s.scrapKg ? ` (${fmtQty(s.scrapKg, 'KG')} kg)` : ''}` : '',
+    `Cash received: ${money(s.received)}`,
+    s.dueFromPeriod ? `Still due from these bills: ${money(s.dueFromPeriod)}` : '',
+    '',
+    ...prods.map(p => `${p.name}: ${fmtQty(p.qty, p.unit)} ${unitLabel(p.unit, p.qty)} = ${money(p.amount)}`),
+  ].filter(x => x !== false && x != null).join('\n').replace(/\n{3,}/g, '\n\n');
+}
+function viewProductReport(key) {
+  const r = periodRange();
+  ensureRange(r);
+  const bills = billsIn(r);
+  const lines = bills.flatMap(b => b.items.filter(it => (it.productId || 'n:' + it.productName.toLowerCase()) === key).map(it => ({ it, b })));
+  const name = lines[0]?.it.productName || getProduct(key)?.name || 'Product';
+  const unit = lines[0]?.it.unit || getProduct(key)?.unit || 'PCS';
+  const qty = round3(lines.reduce((s, l) => s + l.it.quantity, 0));
+  const amount = round2(lines.reduce((s, l) => s + l.it.amount, 0));
+  const ser = series(r);
+  lines.forEach(l => ser.add(l.b.completedAt, l.it.quantity));
+  const byCust = new Map();
+  for (const { it, b } of lines) {
+    const k = custKey(b);
+    const e = byCust.get(k) || { label: custKeyName(k, b), value: 0, amt: 0 };
+    e.value = round3(e.value + it.quantity);
+    byCust.set(k, e);
+  }
+  const u = q => `${fmtQty(q, unit)} ${unitLabel(unit, q)}`;
+  return `${topbar(esc(name), '/reports')}
+  <main class="page">
+    ${periodPicker()}
+    ${rangeNote(r)}
+    <div class="stats">
+      <div class="stat big"><span>${amount < 0 ? 'BOUGHT IN' : 'SOLD'}</span><b>${u(qty)}</b><small>${money(amount)} · ${plural(new Set(lines.map(l => l.b.id)).size, 'bill')}${qty ? ` · avg ${money(round2(amount / qty))}/${unitLabel(unit, 1)}` : ''}</small></div>
+    </div>
+    ${ser.buckets.size > 1 && lines.length ? `<div class="sec-label">${ser.monthly ? 'BY MONTH' : 'BY DAY'}</div>${bars([...ser.buckets.values()], u)}` : ''}
+    ${byCust.size ? `<div class="sec-label">BY CUSTOMER</div>${bars([...byCust.values()].sort((a, b) => b.value - a.value).slice(0, 15), u)}` : '<p class="empty">Not sold in this period</p>'}
+  </main>`;
+}
+
+// --- customer statement & dues
+function viewStatement(key) {
+  const c = getCustomer(key);
+  const sample = allBills().find(b => custKey(b) === key);
+  if (!c && !sample) return S.loaded.bills ? go('/customers', true) : '<div class="boot">Loading…</div>';
+  const name = c?.name || custKeyName(key, sample);
+  const r = periodRange();
+  ensureRange(r);
+  const unpaid = unpaidBills().filter(b => custKey(b) === key);
+  const due = round2(unpaid.reduce((s, b) => s + b.balance, 0));
+  const bills = billsIn(r).filter(b => custKey(b) === key).sort(byTime('completedAt')).reverse();
+  const net = round2(bills.reduce((s, b) => s + b.total, 0));
+  const billRow = b => `<button class="hrow" data-act="openReceipt" data-id="${b.id}">
+    <span class="h-time">${fmtDate(b.completedAt).slice(0, 6)}</span>
+    <span class="h-main"><b>${billLabel(b)}</b><small>${plural(b.items.length, 'item')}${b.isSettled ? ' · paid' : ` · <span class="tag due">DUE ${money(Math.abs(b.balance))}</span>`}</small></span>
+    <span class="h-amt ${b.total < 0 ? 'neg-text' : ''}">${money(b.total)}</span></button>`;
+  return `${topbar(esc(name), c ? '/customers' : '/dues', '<button class="tb-act" data-act="shareStatement" data-key="' + esc(key) + '">📤</button>')}
+  <main class="page">
+    ${c ? `<p class="hint">${esc([c.phone, c.address, c.notes].filter(Boolean).join(' · '))}</p>` : ''}
+    <section class="card ${due > 0 ? 'due-card' : ''}">
+      ${due > 0 ? `<p class="due-big">Owes <b>${money(due)}</b></p><p class="hint">${plural(unpaid.length, 'unpaid bill')} · oldest ${fmtDate(unpaid[0].completedAt)}</p>
+        <button class="btn-big go" data-act="payCustomer" data-key="${esc(key)}">₹ RECEIVE PAYMENT</button>`
+        : due < 0 ? `<p class="due-big">You owe <b>${money(Math.abs(due))}</b></p>` : '<p class="settled-note">✓ No dues</p>'}
+    </section>
+    ${unpaid.length ? `<div class="sec-label">UNPAID BILLS</div><div class="list">${unpaid.map(billRow).join('')}</div>` : ''}
+    ${c ? `<div class="btn-row"><button class="btn-mid" data-act="billForCustomer" data-id="${c.id}">＋ New bill</button><a class="btn-mid" href="#/customer/${c.id}">✎ Edit details</a></div>` : ''}
+    <div class="sec-label">BILLS</div>
+    ${periodPicker()}
+    ${rangeNote(r)}
+    ${bills.length ? `<p class="hint">${plural(bills.length, 'bill')} · total ${money(net)}</p><div class="list">${bills.map(billRow).join('')}</div>` : '<p class="empty">No bills in this period</p>'}
+  </main>`;
+}
+function statementText(key) {
+  const unpaid = unpaidBills().filter(b => custKey(b) === key);
+  const name = custKeyName(key, unpaid[0] || allBills().find(b => custKey(b) === key));
+  const due = round2(unpaid.reduce((s, b) => s + b.balance, 0));
+  return [
+    `${S.shop.shopName}`, `Statement for ${name} · ${fmtDate(now())}`, '------------------------------',
+    ...unpaid.map(b => `Bill ${billLabel(b)} · ${fmtDate(b.completedAt)}: total ${money(b.total)}, due ${money(b.balance)}`),
+    '------------------------------', due ? `TOTAL DUE: ${money(due)}` : 'No dues. Thank you!',
+  ].join('\n');
+}
+function viewDues() {
+  const groups = duesByCustomer();
+  const total = totalDue();
+  const days = iso => Math.floor((Date.now() - new Date(iso)) / 864e5);
+  return `${topbar('Dues', '/')}
+  <main class="page">
+    <section class="card ${total > 0 ? 'due-card' : ''}"><p class="due-big">Total due <b>${money(total)}</b></p><p class="hint">${plural(groups.length, 'customer')} · ${plural(unpaidBills().length, 'unpaid bill')}</p></section>
+    ${groups.length ? `<div class="list">${groups.map(g => `<a class="row" href="#/statement/${encodeURIComponent(g.key)}">
+      <span class="row-main"><b>${esc(g.name)}</b><small>${plural(g.bills.length, 'bill')} · oldest ${days(g.bills[0].completedAt)} days</small></span>
+      <span class="due-amt">${g.balance < 0 ? 'WE OWE' : 'DUE'}<b>${money(Math.abs(g.balance))}</b></span><span class="chev">›</span></a>`).join('')}</div>` : '<p class="empty">🎉 Nobody owes anything</p>'}
+  </main>`;
+}
+
+// --- receive / record a payment
+function openPaySheet(ctx) {
+  sheetCtx = { ...ctx, method: 'Cash' };
+  const out = ctx.balance < 0;
+  openSheet(`
+    <div class="sheet-head"><div><div class="sh-title">${out ? 'Record payout' : 'Receive payment'}</div>
+      <div class="sh-sub">${esc(ctx.name)} · ${out ? 'to pay' : 'due'} <b>${money(Math.abs(ctx.balance))}</b></div></div>
+      <button type="button" class="x" data-act="closeSheet" aria-label="Close">✕</button></div>
+    <label class="lbl" for="payIn">AMOUNT ${out ? 'PAID OUT' : 'RECEIVED'} (₹)</label>
+    <input id="payIn" class="qty-input" inputmode="decimal" autocomplete="off" value="${Math.abs(ctx.balance)}">
+    <div class="seg sign">${['Cash', 'UPI', 'Other'].map(m => `<button type="button" class="${m === 'Cash' ? 'on' : ''}" data-act="setMethod" data-m="${m}">${m}</button>`).join('')}</div>
+    <p class="calc" id="payInfo"></p>
+    ${ctx.mode === 'customer' ? '<p class="hint">Applied to the oldest unpaid bills first.</p>' : ''}
+    <button type="button" class="btn-big go" id="payGo" data-act="savePayment">SAVE PAYMENT</button>`);
+  updatePayInfo();
+  $('#payIn').focus();
+  $('#payIn').select();
+}
+function updatePayInfo() {
+  if (!sheetCtx) return;
+  const a = num($('#payIn').value);
+  const max = Math.abs(sheetCtx.balance);
+  const ok = a > 0 && a <= max + 0.005;
+  $('#payInfo').innerHTML = !(a > 0) ? 'Enter amount' : !ok ? `<span class="neg-text">More than ${money(max)}</span>`
+    : a >= max - 0.005 ? '<b class="ok-text">Fully settles</b>' : `Leaves <b>${money(round2(max - a))}</b> due`;
+  $('#payGo').disabled = !ok;
+}
+
 // --- settings
 function viewSettings() {
   const s = S.shop;
@@ -854,18 +1243,20 @@ function closeSheet(fromRender = false) {
 }
 $('#sheet').addEventListener('click', e => { if (e.target.id === 'sheet') closeSheet(); });
 
-function confirmBox({ title, body = '', ok = 'YES', cancel = 'NO', danger = false, typeToConfirm = null }) {
+// Resolves true (ok), false (cancel) or 'alt' (optional middle choice).
+function confirmBox({ title, body = '', ok = 'YES', cancel = 'NO', alt = null, danger = false, typeToConfirm = null }) {
   return new Promise(resolve => {
     const m = $('#modal');
     m.innerHTML = `<div class="modal" role="alertdialog"><h3>${title}</h3>${body ? `<p>${body}</p>` : ''}
       ${typeToConfirm ? `<input id="mConfirm" class="input big" placeholder="Type ${typeToConfirm}" autocomplete="off">` : ''}
-      <div class="btn-row"><button class="btn-mid" data-m="0">${cancel}</button><button class="btn-mid ${danger ? 'danger-fill' : 'go'}" data-m="1">${ok}</button></div></div>`;
+      ${alt ? `<button class="btn-big go" data-m="1">${ok}</button><button class="btn-mid due" data-m="alt">${alt}</button><button class="btn-mid" data-m="0">${cancel}</button>`
+        : `<div class="btn-row"><button class="btn-mid" data-m="0">${cancel}</button><button class="btn-mid ${danger ? 'danger-fill' : 'go'}" data-m="1">${ok}</button></div>`}</div>`;
     m.hidden = false;
     m.onclick = e => {
       const b = e.target.closest('[data-m]');
       if (!b && e.target !== m) return;
-      const yes = !!b && b.dataset.m === '1';
-      if (yes && typeToConfirm && $('#mConfirm').value.trim().toUpperCase() !== typeToConfirm) {
+      const yes = !b ? false : b.dataset.m === '1' ? true : b.dataset.m === 'alt' ? 'alt' : false;
+      if (yes === true && typeToConfirm && $('#mConfirm').value.trim().toUpperCase() !== typeToConfirm) {
         toast(`Type ${typeToConfirm} to confirm`, 'err');
         return;
       }
@@ -1103,12 +1494,19 @@ const A = {
   async completeBill() {
     let bill = getBill(R.b);
     if (!bill.items.length) return toast('Add at least one item first', 'err');
-    const amt = bill.total < 0 ? `Pay to customer <b>${money(Math.abs(bill.total))}</b>` : `Total <b>${money(bill.total)}</b>`;
-    if (!await confirmBox({ title: `Complete bill for ${esc(billName(bill))}?`, body: `${plural(bill.items.length, 'item')} · ${amt}`, ok: '✓ COMPLETE' })) return;
+    const out = bill.total < 0;
+    const amt = out ? `Pay to customer <b>${money(Math.abs(bill.total))}</b>` : `Total <b>${money(bill.total)}</b>`;
+    const choice = await confirmBox({
+      title: `Complete bill for ${esc(billName(bill))}?`, body: `${plural(bill.items.length, 'item')} · ${amt}`,
+      ok: out ? '✓ PAID OUT' : '✓ PAID', alt: out ? 'PAY LATER' : 'PAY LATER (DUE)', cancel: 'BACK',
+    });
+    if (!choice) return;
     bill = getBill(bill.id); // may have changed on the other phone meanwhile
     if (!bill || bill.status !== 'ACTIVE' && bill.status !== 'DRAFT') return toast('This bill was already closed on another phone', 'err');
     const at = now();
     updateBill(bill, { status: 'COMPLETED', completedAt: at, completedBy: S.user.email });
+    if (choice === true && bill.total) addPayment(bill, bill.total, 'Cash');
+    else cloud.update('bills', bill.id, payStateOf(bill));
     adjustStock(bill);
     if (bill.customerId && getCustomer(bill.customerId)) cloud.update('customers', bill.customerId, { lastBilledAt: at });
     toast('✓ Bill completed');
@@ -1125,20 +1523,70 @@ const A = {
     toast('Bill cancelled');
     go('/', true);
   },
-  async shareBill(el) {
+  shareBill(el) {
     const bill = getBill(el.dataset.id);
-    const text = receiptText(bill);
-    try {
-      if (navigator.share) await navigator.share({ title: `Bill ${billLabel(bill)}`, text });
-      else {
-        await navigator.clipboard.writeText(text);
-        toast('Bill copied — paste it in WhatsApp/SMS');
-      }
-    } catch (e) {
-      if (e.name !== 'AbortError') toast('Could not share', 'err');
-    }
+    shareText(`Bill ${billLabel(bill)}`, receiptText(bill));
   },
   printBill() { window.print(); },
+
+  // --- reports & payments
+  setPeriod(el) {
+    rep.period = el.dataset.p;
+    if (rep.period === 'custom' && !rep.from) {
+      rep.from = dayKey(addDays(new Date(), -6));
+      rep.to = dayKey(new Date());
+    }
+    render(true);
+  },
+  setTab(el) {
+    rep.tab = el.dataset.t;
+    if (R.a !== 'reports' || R.b) return go('/reports');
+    render(true);
+  },
+  shareReport() { shareText('Sales report', reportText()); },
+  shareStatement(el) { shareText('Statement', statementText(el.dataset.key)); },
+  payBill(el) {
+    const b = getBill(el.dataset.id);
+    openPaySheet({ mode: 'bill', billId: b.id, name: `${billName(b)} · ${billLabel(b)}`, balance: b.balance });
+  },
+  payCustomer(el) {
+    const g = duesByCustomer().find(x => x.key === el.dataset.key);
+    if (!g || g.balance <= 0) return toast('Nothing due', 'err');
+    openPaySheet({ mode: 'customer', key: g.key, name: g.name, balance: g.balance });
+  },
+  setMethod(el) {
+    sheetCtx.method = el.dataset.m;
+    el.parentElement.querySelectorAll('button').forEach(b => b.classList.toggle('on', b === el));
+  },
+  savePayment() {
+    const ctx = sheetCtx;
+    if (!ctx) return;
+    const amt = num($('#payIn').value);
+    if (!(amt > 0) || amt > Math.abs(ctx.balance) + 0.005) return toast('Check the amount', 'err');
+    if (ctx.mode === 'bill') {
+      const b = getBill(ctx.billId);
+      addPayment(b, Math.sign(b.balance) * amt, ctx.method);
+    } else {
+      // Oldest unpaid bills first.
+      let left = amt;
+      for (const b of unpaidBills().filter(x => custKey(x) === ctx.key && x.balance > 0)) {
+        if (left <= 0.005) break;
+        const take = round2(Math.min(left, b.balance));
+        addPayment(b, take, ctx.method);
+        left = round2(left - take);
+      }
+    }
+    toast(`✓ ${money(amt)} ${ctx.balance < 0 ? 'paid to' : 'received from'} ${ctx.name.split(' · ')[0]}`);
+    render(true);
+  },
+  async deletePayment(el) {
+    const b = getBill(el.dataset.bill);
+    const p = b.payments.find(x => x.id === el.dataset.id);
+    if (!await confirmBox({ title: 'Delete this payment?', body: `${money(Math.abs(p.amount))} on ${fmtDate(p.at)}. The bill will show as due again.`, ok: 'DELETE', danger: true })) return;
+    removePayment(getBill(b.id), p.id);
+    toast('Payment deleted');
+    render(true);
+  },
   async loadOlder(el) {
     if (!navigator.onLine) return toast('Needs internet to load older bills', 'err');
     el.disabled = true;
@@ -1318,6 +1766,18 @@ const A = {
   },
 };
 
+async function shareText(title, text) {
+  try {
+    if (navigator.share) await navigator.share({ title, text });
+    else {
+      await navigator.clipboard.writeText(text);
+      toast('Copied — paste it in WhatsApp/SMS');
+    }
+  } catch (e) {
+    if (e.name !== 'AbortError') toast('Could not share', 'err');
+  }
+}
+
 function setBillCustomer({ id, name, phone, type }) {
   const bill = getBill(R.b);
   updateBill(bill, { customerChosen: true, customerId: id, customerName: name, customerPhone: phone || '', customerType: type });
@@ -1342,6 +1802,7 @@ const INPUTS = {
   histSearch: v => ($('#histResults').innerHTML = historyResults(v)),
   qtyIn: updateCalc,
   rateIn: updateCalc,
+  payIn: updatePayInfo,
 };
 document.addEventListener('input', e => INPUTS[e.target.id]?.(e.target.value));
 
@@ -1349,6 +1810,7 @@ const ENTER = {
   qtyIn: () => A.confirmQty(),
   rateIn: () => A.confirmQty(),
   priceIn: () => A.savePrice(),
+  payIn: () => A.savePayment(),
   ooName: () => $('#ooPhone').focus(),
   ooPhone: () => A.confirmOneOff(),
   emuEmail: () => A.emuSignIn(),
@@ -1370,6 +1832,9 @@ document.addEventListener('change', async e => {
     S.shop[t.dataset.shop] = value;
     cloud.setMeta('shop', { [t.dataset.shop]: value });
     toast('✓ Saved for all phones');
+  } else if (t.dataset.rep) {
+    rep[t.dataset.rep] = t.value;
+    render(true);
   } else if (t.dataset.local === 'deviceCode') {
     const code = value.toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 2);
     if (!code) return toast('Enter a letter', 'err');

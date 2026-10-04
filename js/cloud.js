@@ -75,23 +75,29 @@ export const cloud = {
     for (const col of ['products', 'customers', 'meta']) {
       unsubs.push(onSnapshot(collection(fs, col), opts, s => handler(col, s.docs.map(d => ({ id: d.id, ...d.data() })), meta(s)), onError));
     }
-    // Bills: everything still open, plus anything touched recently. Older
-    // history is fetched on demand so daily reads stay small.
+    // Bills: everything still open or unpaid, plus anything touched recently.
+    // Older history is fetched on demand so daily reads stay small.
     const open = new Map();
+    const unpaid = new Map();
     const recent = new Map();
-    const emit = s => handler('bills', [...new Map([...recent, ...open]).values()], meta(s));
+    const emit = s => handler('bills', [...new Map([...recent, ...unpaid, ...open]).values()], meta(s));
     const track = (map, q) => unsubs.push(onSnapshot(q, opts, s => {
       map.clear();
       s.docs.forEach(d => map.set(d.id, { id: d.id, ...d.data() }));
       emit(s);
     }, onError));
     track(open, query(collection(fs, 'bills'), where('status', 'in', ['DRAFT', 'ACTIVE'])));
+    track(unpaid, query(collection(fs, 'bills'), where('settled', '==', false)));
     track(recent, query(collection(fs, 'bills'), where('updatedAt', '>=', recentSinceIso)));
     return () => unsubs.forEach(u => u());
   },
 
   async loadBillsBefore(iso, max = 300) {
     const s = await getDocs(query(collection(fs, 'bills'), where('updatedAt', '<', iso), orderBy('updatedAt', 'desc'), limit(max)));
+    return s.docs.map(d => ({ id: d.id, ...d.data() }));
+  },
+  async loadBillsCompletedBetween(fromIso, toIso) {
+    const s = await getDocs(query(collection(fs, 'bills'), where('completedAt', '>=', fromIso), where('completedAt', '<', toIso)));
     return s.docs.map(d => ({ id: d.id, ...d.data() }));
   },
 
@@ -108,13 +114,14 @@ export const cloud = {
   setMeta(id, fields) {
     setDoc(ref('meta', id), clean(fields), { merge: true }).catch(cloud.onError);
   },
-  // Items live in a map on the bill, so two phones adding items to the same
-  // bill at the same moment never overwrite each other.
-  setBillItem(billId, item, fields) {
-    updateDoc(ref('bills', billId), new FieldPath('items', item.id), clean(item), ...pairs(clean(fields))).catch(cloud.onError);
+  // Items and payments live in maps on the bill (map = 'items' | 'payments'),
+  // so two phones adding to the same bill at the same moment never overwrite
+  // each other.
+  setBillEntry(billId, map, entry, fields) {
+    updateDoc(ref('bills', billId), new FieldPath(map, entry.id), clean(entry), ...pairs(clean(fields))).catch(cloud.onError);
   },
-  removeBillItem(billId, itemId, fields) {
-    updateDoc(ref('bills', billId), new FieldPath('items', itemId), deleteField(), ...pairs(clean(fields))).catch(cloud.onError);
+  removeBillEntry(billId, map, entryId, fields) {
+    updateDoc(ref('bills', billId), new FieldPath(map, entryId), deleteField(), ...pairs(clean(fields))).catch(cloud.onError);
   },
   addStock(productId, delta, at) {
     updateDoc(ref('products', productId), { stock: increment(delta), updatedAt: at }).catch(cloud.onError);

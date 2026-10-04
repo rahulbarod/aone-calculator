@@ -273,6 +273,59 @@ textarea.input { resize: vertical; }
 .card p { margin: 0; }
 .ver { text-align: center; color: var(--muted); font-size: 14px; }
 .card.note { border-color: var(--brand-2); background: #eef5fc; }
+/* ---------- dues & payments ---------- */
+:root { --due: #b45309; --due-bg: #fff7e6; --due-line: #f5c97a; }
+.due-text { color: var(--due) !important; }
+.ok-text { color: var(--go); }
+.tag.due { background: var(--due); color: #fff; margin-left: 0; }
+.stamp.due { border-color: var(--due); color: var(--due); }
+.tile small { font-size: 14px; font-weight: 800; letter-spacing: 0; }
+.tile.has-due { border-color: var(--due-line); background: var(--due-bg); }
+.tile.has-due small { color: var(--due); }
+.due-amt { display: flex; flex-direction: column; align-items: flex-end; font-size: 11px; font-weight: 900; letter-spacing: .06em; color: var(--due); }
+.due-amt b { font-size: 19px; letter-spacing: 0; }
+.btn-mid.due { border-color: var(--due-line); color: var(--due); background: var(--due-bg); }
+.card.due-card { border-color: var(--due-line); background: var(--due-bg); }
+.due-big { font-size: 20px; }
+.due-big b { font-size: 30px; color: var(--due); }
+.due-note b { color: var(--due); font-size: 20px; }
+.settled-note { color: var(--go); font-weight: 800; }
+.pay-row { display: flex; align-items: center; gap: 10px; padding: 6px 0; border-top: 1px solid var(--line); }
+.pay-row > span { flex: 1; display: flex; flex-direction: column; }
+.pay-row .x { width: 40px; height: 40px; font-size: 16px; }
+.r-pay { margin-top: 8px; padding-top: 8px; border-top: 1px solid var(--line); font-size: 15px; color: #334155; }
+.r-pay div { display: flex; justify-content: space-between; }
+.r-bal { margin-top: 4px; font-weight: 900; color: var(--due) !important; font-size: 18px; }
+
+/* ---------- reports ---------- */
+.chips { display: flex; gap: 8px; overflow-x: auto; scrollbar-width: none; margin: 0 -16px; padding: 0 16px; }
+.chips::-webkit-scrollbar { display: none; }
+.pchip { flex: none; min-height: 46px; padding: 0 16px; border-radius: 999px; background: #fff; border: 2px solid var(--line); font-weight: 800; font-size: 15px; }
+.pchip.on { background: var(--brand); border-color: var(--brand); color: #fff; }
+.range-lbl { margin: 0; font-weight: 800; color: var(--muted); }
+.hint.warn { color: var(--due); }
+.seg.tabs button { flex: 1; width: auto; min-height: 48px; }
+.seg.tabs { flex-wrap: nowrap; }
+.stats { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+.stat { background: #fff; border: 2px solid var(--line); border-radius: var(--r); padding: 12px; display: flex; flex-direction: column; gap: 2px; font-variant-numeric: tabular-nums; }
+.stat span { font-size: 12px; font-weight: 900; letter-spacing: .06em; color: var(--muted); }
+.stat b { font-size: 22px; font-weight: 900; }
+.stat.big { grid-column: 1 / -1; background: var(--brand); border-color: var(--brand); color: #fff; }
+.stat.big span, .stat.big small { color: #c9d8e8; }
+.stat.big b { font-size: 34px; }
+.stat.big b.neg-text { color: #ffc9c9 !important; }
+.bars { display: flex; flex-direction: column; gap: 6px; background: #fff; border: 2px solid var(--line); border-radius: var(--r); padding: 12px; }
+.bar-row { display: grid; grid-template-columns: minmax(70px, 34%) 1fr auto; align-items: center; gap: 8px; font-size: 15px; font-variant-numeric: tabular-nums; }
+.bar-lbl { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; color: #334155; }
+.bar { height: 14px; background: #edf1f6; border-radius: 7px; overflow: hidden; }
+.bar i { display: block; height: 100%; background: var(--brand-2); border-radius: 7px; min-width: 2px; }
+.bar i.neg { background: var(--neg); }
+.bar-row b { min-width: 64px; text-align: right; }
+.rep-row { display: flex; align-items: center; gap: 10px; min-height: 62px; padding: 10px 14px; background: #fff; border: 2px solid var(--line); border-radius: var(--r); }
+.rep-row > b { font-size: 19px; font-variant-numeric: tabular-nums; }
+.rep-row.neg { background: var(--neg-bg); border-color: var(--neg-line); }
+.rep-row:active { background: var(--press); }
+.sec-label .link { font-size: 14px; float: right; padding: 0 4px; }
 .card h2 small { font-weight: 600; }
 .sync-badge { display: inline-block; margin-top: 10px; padding: 4px 12px; border-radius: 999px; font-size: 13px; font-weight: 800; background: rgba(255,255,255,.16); color: #fff; }
 .sync-badge.wait { background: #f59e0b; color: #1f1300; }
