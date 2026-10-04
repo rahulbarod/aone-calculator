@@ -4,7 +4,7 @@ import { voice } from './voice.js';
 import { scale } from './scale.js';
 import { parseProductSpeech } from './parse.js';
 
-const APP_VERSION = '2.2.0';
+const APP_VERSION = '2.2.2';
 
 // ---------------------------------------------------------------- constants
 const UNITS = {
@@ -122,9 +122,18 @@ function lineAmount(qty, rate, unit, priceType) {
   if (unit === 'GRAM' && priceType === 'PER_KG') q = qty / 1000;
   return round2(q * rate);
 }
-function lineCalcText(it) {
-  return `${[fmtQty(it.quantity, it.unit), unitLabel(it.unit, it.quantity)].filter(Boolean).join(' ')} × ${money(it.rate)}`;
+function lineCalcText(it, plainRate = false) {
+  return `${[fmtQty(it.quantity, it.unit), unitLabel(it.unit, it.quantity)].filter(Boolean).join(' ')} × ${money(plainRate ? Math.abs(it.rate) : it.rate)}`;
 }
+// The shop's bill layout: purchases first with their own total, then the
+// scrap taken from the customer (deducted), then the final amount.
+function billSections(b) {
+  const sales = b.items.filter(i => i.amount >= 0);
+  const scrap = b.items.filter(i => i.amount < 0);
+  const sum = list => round2(list.reduce((s, i) => s + i.amount, 0));
+  return { sales, scrap, salesTotal: sum(sales), scrapTotal: sum(scrap) };
+}
+const finalLabel = b => (b.total < 0 ? 'PAY TO CUSTOMER' : b.items.some(i => i.amount < 0) ? 'AMOUNT TO PAY' : 'TOTAL');
 // Products added quickly while billing stay flagged until someone fills in the gaps.
 function missingInfo(p) {
   if (!p.needsReview) return [];
@@ -623,8 +632,7 @@ function productPickResults(q) {
 // --- the bill
 function viewBill(bill) {
   const act = activeBills();
-  const pos = round2(bill.items.filter(i => i.amount >= 0).reduce((s, i) => s + i.amount, 0));
-  const neg = round2(bill.items.filter(i => i.amount < 0).reduce((s, i) => s + i.amount, 0));
+  const sec = billSections(bill);
   const c = bill.customerId ? getCustomer(bill.customerId) : null;
   const sub = [bill.customerPhone, bill.customerType === 'REGULAR' ? 'Regular' : 'One-off'].filter(Boolean).join(' · ');
   return `${topbar(`Bill ${billLabel(bill)}`, '/', `<span class="status">${bill.status}</span>`)}
@@ -638,13 +646,15 @@ function viewBill(bill) {
       <span class="cc-main"><small>CUSTOMER</small><b>${esc(billName(bill))}</b>${sub ? `<small>${esc(sub)}${c && c.notes ? ' · ' + esc(c.notes) : ''}</small>` : ''}</span>
       <span class="link">Change</span>
     </button>
-    ${bill.items.length
-      ? `<div class="items">${bill.items.map(itemRow).join('')}</div>`
-      : '<div class="empty big">No items yet.<br>Tap <b>＋ ADD ITEM</b> below.</div>'}
-    ${neg && pos ? `<div class="breakdown"><div><span>Items</span><b>${money(pos)}</b></div><div class="neg-text"><span>Scrap / return</span><b>${money(neg)}</b></div></div>` : ''}
+    ${!bill.items.length ? '<div class="empty big">No items yet.<br>Tap <b>＋ ADD ITEM</b> below.</div>'
+      : !sec.scrap.length ? `<div class="items">${sec.sales.map(itemRow).join('')}</div>`
+      : `${sec.sales.length ? `<div class="sec-label">ITEMS</div><div class="items">${sec.sales.map(itemRow).join('')}
+          <div class="subtotal"><span>ITEMS TOTAL</span><b>${money(sec.salesTotal)}</b></div></div>` : ''}
+        <div class="sec-label neg-text">SCRAP TAKEN (MINUS)</div><div class="items scrap-box">${sec.scrap.map(itemRow).join('')}
+          <div class="subtotal neg"><span>SCRAP TOTAL</span><b>${money(sec.scrapTotal)}</b></div></div>`}
   </main>
   <footer class="footbar bill-foot">
-    <div class="total-row"><span>${bill.total < 0 ? 'PAY TO CUSTOMER' : 'TOTAL'}</span><b class="${bill.total < 0 ? 'neg-text' : ''}">${money(Math.abs(bill.total))}</b></div>
+    <div class="total-row"><span>${finalLabel(bill)}</span><b class="${bill.total < 0 ? 'neg-text' : ''}">${money(Math.abs(bill.total))}</b></div>
     <a class="btn-mid add" href="#/bill/${bill.id}/add">＋ ADD ITEM</a>
     <div class="foot-btns">
       <button class="btn-mid danger" data-act="cancelBill">CANCEL</button>
@@ -656,8 +666,8 @@ function viewBill(bill) {
 function itemRow(it) {
   const neg = it.amount < 0;
   return `<button class="item ${neg ? 'neg' : ''}" data-act="editItem" data-id="${it.id}">
-    <span class="it-main"><span class="it-name">${esc(it.productName)}${neg ? '<span class="tag scrap">SCRAP</span>' : ''}</span>
-    <span class="it-calc">${lineCalcText(it)}</span></span>
+    <span class="it-main"><span class="it-name">${esc(it.productName)}</span>
+    <span class="it-calc">${lineCalcText(it, neg)}</span></span>
     <span class="it-amt">${money(it.amount)}</span></button>`;
 }
 
@@ -671,10 +681,18 @@ function receiptHtml(b) {
     ${s.shopPhone ? `<div class="r-sub">📞 ${esc(s.shopPhone)}</div>` : ''}
     <div class="r-meta"><span>Bill ${billLabel(b)}</span><span>${fmtDate(when)}, ${fmtTime(when)}</span></div>
     <div class="r-cust">Customer: <b>${esc(billName(b))}</b>${b.customerPhone ? ` · ${esc(b.customerPhone)}` : ''}</div>
-    <div class="r-items">${b.items.map(it => `<div class="r-item ${it.amount < 0 ? 'neg' : ''}">
-      <div class="r-name">${esc(it.productName)}${it.amount < 0 ? ' <span class="tag scrap">SCRAP</span>' : ''}</div>
-      <div class="r-line"><span>${lineCalcText(it)}</span><b>${money(it.amount)}</b></div></div>`).join('')}</div>
-    <div class="r-total"><span>${b.total < 0 ? 'TO CUSTOMER' : 'TOTAL'}</span>${b.status === 'CANCELLED' ? '<i class="stamp">CANCELLED</i>' : b.status !== 'COMPLETED' ? '' : b.isSettled ? '<i class="stamp ok">PAID</i>' : '<i class="stamp due">DUE</i>'}<b>${money(Math.abs(b.total))}</b></div>
+    ${(() => {
+      const sec = billSections(b);
+      const line = it => `<div class="r-item ${it.amount < 0 ? 'neg' : ''}"><div class="r-name">${esc(it.productName)}</div>
+        <div class="r-line"><span>${lineCalcText(it, it.amount < 0)}</span><b>${money(it.amount)}</b></div></div>`;
+      if (!sec.scrap.length) return `<div class="r-items">${sec.sales.map(line).join('')}</div>`;
+      return `${sec.sales.length ? `<div class="r-items">${sec.sales.map(line).join('')}</div>
+        <div class="r-subtotal"><span>Items total</span><b>${money(sec.salesTotal)}</b></div>` : ''}
+        <div class="r-section neg-text">SCRAP TAKEN (MINUS)</div>
+        <div class="r-items">${sec.scrap.map(line).join('')}</div>
+        <div class="r-subtotal neg-text"><span>Scrap total</span><b>${money(sec.scrapTotal)}</b></div>`;
+    })()}
+    <div class="r-total"><span>${finalLabel(b)}</span>${b.status === 'CANCELLED' ? '<i class="stamp">CANCELLED</i>' : b.status !== 'COMPLETED' ? '' : b.isSettled ? '<i class="stamp ok">PAID</i>' : '<i class="stamp due">DUE</i>'}<b>${money(Math.abs(b.total))}</b></div>
     ${b.status === 'COMPLETED' && (b.payments.length > 1 || !b.isSettled) ? `<div class="r-pay">
       ${b.payments.map(p => `<div><span>${p.amount < 0 ? 'Paid out' : 'Received'} · ${fmtDate(p.at)}${p.method ? ' · ' + esc(p.method) : ''}</span><b>${money(Math.abs(p.amount))}</b></div>`).join('')}
       ${b.isSettled ? '' : `<div class="r-bal"><span>BALANCE ${b.balance < 0 ? 'TO PAY CUSTOMER' : 'DUE'}</span><b>${money(Math.abs(b.balance))}</b></div>`}
@@ -698,9 +716,17 @@ function receiptText(b) {
     `Bill ${billLabel(b)} · ${fmtDate(when)} ${fmtTime(when)}`,
     `Customer: ${billName(b)}${b.customerPhone ? ' (' + b.customerPhone + ')' : ''}`,
     '------------------------------',
-    ...b.items.map(it => `${it.productName}\n  ${lineCalcText(it)} = ${money(it.amount)}`),
+    ...(() => {
+      const sec = billSections(b);
+      const line = it => `${it.productName}\n  ${lineCalcText(it, it.amount < 0)} = ${money(it.amount)}`;
+      if (!sec.scrap.length) return sec.sales.map(line);
+      return [
+        ...sec.sales.map(line), sec.sales.length && `Items total: ${money(sec.salesTotal)}`,
+        '', 'SCRAP TAKEN (MINUS)', ...sec.scrap.map(line), `Scrap total: ${money(sec.scrapTotal)}`,
+      ];
+    })(),
     '------------------------------',
-    `${b.total < 0 ? 'TO CUSTOMER' : 'TOTAL'}: ${money(Math.abs(b.total))}`,
+    `${finalLabel(b)}: ${money(Math.abs(b.total))}`,
     b.status === 'COMPLETED' && !b.isSettled && `Paid: ${money(Math.abs(b.paid))}\nBALANCE DUE: ${money(Math.abs(b.balance))}`,
     b.status === 'CANCELLED' ? '*** CANCELLED ***' : 'Thank you!',
   ];
@@ -713,7 +739,7 @@ function viewReceipt(bill, back) {
     ${paymentsPanel(bill)}
     <div class="btn-row">
       <button class="btn-mid" data-act="shareBill" data-id="${bill.id}">📤 SHARE</button>
-      <button class="btn-mid" data-act="printBill">🖨 PRINT</button>
+      <button class="btn-mid" data-act="printBill" data-id="${bill.id}">🖨 PRINT</button>
     </div>
     <button class="btn-big go" data-act="newBill">＋ NEW BILL</button>
     <a class="btn-mid" href="#/">HOME</a>
@@ -1696,7 +1722,22 @@ const A = {
     const bill = getBill(el.dataset.id);
     shareText(`Bill ${billLabel(bill)}`, receiptText(bill));
   },
-  printBill() { window.print(); },
+  // iPhone home-screen apps ignore window.print(), and some Android setups do
+  // too. There the bill goes out as an image through the share menu, which
+  // offers Print (and WhatsApp, Save image…). Elsewhere the normal print dialog
+  // opens; if it doesn't start within a moment, the image route is used.
+  printBill(el) {
+    const bill = getBill(el.dataset.id);
+    if (IS_IOS || typeof window.print !== 'function') return shareBillImage(bill, true);
+    let started = false;
+    const mark = () => (started = true);
+    window.addEventListener('beforeprint', mark, { once: true });
+    window.print();
+    setTimeout(() => {
+      window.removeEventListener('beforeprint', mark);
+      if (!started) shareBillImage(bill, true);
+    }, 700);
+  },
 
   // --- reports & payments
   setPeriod(el) {
@@ -1934,6 +1975,136 @@ const A = {
     }
   },
 };
+
+const IS_IOS = /iPhone|iPad|iPod/.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+
+// Draws the bill as a black-and-white image, 576 px wide (fits 80 mm
+// thermal printers as well as normal paper and WhatsApp).
+function receiptCanvas(b) {
+  const W = 576;
+  const P = 28;
+  const c = document.createElement('canvas');
+  c.width = W;
+  c.height = 900 + b.items.length * 140 + (b.payments?.length || 0) * 40;
+  const g = c.getContext('2d');
+  g.fillStyle = '#fff';
+  g.fillRect(0, 0, W, c.height);
+  g.fillStyle = '#000';
+  g.textBaseline = 'top';
+  let y = P;
+  const font = (size, bold) => (g.font = `${bold ? 700 : 400} ${size}px system-ui, -apple-system, "Segoe UI", Roboto, "Noto Sans", sans-serif`);
+  const fit = (t, max) => {
+    if (g.measureText(t).width <= max) return t;
+    while (t.length > 1 && g.measureText(t + '…').width > max) t = t.slice(0, -1);
+    return t + '…';
+  };
+  const wrap = (t, max) => {
+    const out = [];
+    let line = '';
+    for (const w of String(t).split(' ')) {
+      const next = line ? line + ' ' + w : w;
+      if (g.measureText(next).width > max && line) {
+        out.push(line);
+        line = w;
+      } else line = next;
+    }
+    return out.concat(line ? [line] : []);
+  };
+  const text = (t, { size = 24, bold = false, align = 'left' } = {}) => {
+    font(size, bold);
+    g.textAlign = align;
+    for (const l of wrap(t, W - 2 * P)) {
+      g.fillText(l, align === 'center' ? W / 2 : align === 'right' ? W - P : P, y);
+      y += Math.round(size * 1.3);
+    }
+  };
+  const row = (left, right, { size = 24, bold = false } = {}) => {
+    font(size, bold);
+    const rw = g.measureText(right).width;
+    g.textAlign = 'left';
+    g.fillText(fit(left, W - 2 * P - rw - 16), P, y);
+    g.textAlign = 'right';
+    g.fillText(right, W - P, y);
+    y += Math.round(size * 1.3);
+  };
+  const rule = (dashed = true) => {
+    g.setLineDash(dashed ? [8, 6] : []);
+    g.lineWidth = 2;
+    g.beginPath();
+    g.moveTo(P, y + 6);
+    g.lineTo(W - P, y + 6);
+    g.stroke();
+    y += 20;
+  };
+  const when = b.completedAt || b.updatedAt;
+  text(S.shop.shopName, { size: 34, bold: true, align: 'center' });
+  if (S.shop.shopAddress) text(S.shop.shopAddress, { size: 22, align: 'center' });
+  if (S.shop.shopPhone) text('Ph: ' + S.shop.shopPhone, { size: 22, align: 'center' });
+  rule();
+  row(`Bill ${billLabel(b)}`, `${fmtDate(when)}, ${fmtTime(when)}`, { size: 22 });
+  text(`Customer: ${billName(b)}${b.customerPhone ? ' · ' + b.customerPhone : ''}`, { size: 24, bold: true });
+  rule();
+  const sec = billSections(b);
+  const lines = list => list.forEach(it => {
+    text(it.productName, { size: 25, bold: true });
+    row('   ' + lineCalcText(it, it.amount < 0), money(it.amount));
+    y += 6;
+  });
+  lines(sec.sales);
+  if (sec.scrap.length) {
+    if (sec.sales.length) {
+      rule();
+      row('Items total', money(sec.salesTotal), { size: 26, bold: true });
+    }
+    y += 14;
+    text('SCRAP TAKEN (MINUS)', { size: 26, bold: true });
+    y += 4;
+    lines(sec.scrap);
+    rule();
+    row('Scrap total', money(sec.scrapTotal), { size: 26, bold: true });
+  }
+  rule(false);
+  row(finalLabel(b), money(Math.abs(b.total)), { size: 34, bold: true });
+  if (b.status === 'COMPLETED' && !b.isSettled) {
+    row('Paid', money(Math.abs(b.paid)), { size: 24 });
+    row('BALANCE DUE', money(Math.abs(b.balance)), { size: 28, bold: true });
+  }
+  y += 8;
+  text(b.status === 'CANCELLED' ? '*** CANCELLED ***' : b.status !== 'COMPLETED' ? 'ESTIMATE (not completed)' : b.isSettled ? 'PAID — Thank you!' : 'Thank you!', { size: 24, bold: true, align: 'center' });
+  y += P;
+  const out = document.createElement('canvas');
+  out.width = W;
+  out.height = y;
+  out.getContext('2d').drawImage(c, 0, 0);
+  return out;
+}
+function shareBillImage(bill, forPrint = false) {
+  // Built synchronously so the share menu still counts as a response to the tap (needed on iPhone).
+  const url = receiptCanvas(bill).toDataURL('image/png');
+  const bin = atob(url.split(',')[1]);
+  const bytes = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+  const name = `bill-${billLabel(bill).slice(1)}.png`;
+  const file = new File([bytes], name, { type: 'image/png' });
+  if (navigator.canShare?.({ files: [file] })) {
+    if (forPrint) toast('Choose “Print” in the menu');
+    navigator.share({ files: [file], title: `Bill ${billLabel(bill)}` }).catch(e => {
+      if (e.name !== 'AbortError') downloadBlob(file, name);
+    });
+  } else {
+    downloadBlob(file, name);
+    toast('Bill image saved — open it to print');
+  }
+}
+function downloadBlob(blob, name) {
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = name;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(a.href), 5000);
+}
 
 async function shareText(title, text) {
   try {

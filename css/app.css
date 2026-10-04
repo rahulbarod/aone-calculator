@@ -382,3 +382,13 @@ textarea.input { resize: vertical; }
 .card.inc-card { border-color: var(--inc-line); background: var(--inc-bg); color: var(--inc); }
 .tile.has-inc { border-color: var(--inc-line); background: var(--inc-bg); }
 .tile.has-inc small { color: var(--inc); }
+
+/* ---------- bill sections: purchases, then scrap ---------- */
+.subtotal { display: flex; justify-content: space-between; align-items: baseline; padding: 12px 14px; background: #f3f6fa; border-top: 2px solid var(--line); font-weight: 900; font-variant-numeric: tabular-nums; }
+.subtotal span { font-size: 14px; letter-spacing: .06em; color: var(--muted); }
+.subtotal b { font-size: 21px; }
+.subtotal.neg { background: var(--neg-bg); border-top-color: var(--neg-line); }
+.subtotal.neg span, .subtotal.neg b { color: var(--neg); }
+.items.scrap-box { border-color: var(--neg-line); }
+.r-subtotal { display: flex; justify-content: space-between; padding: 8px 0 4px; border-top: 1px dashed var(--line); font-weight: 800; }
+.r-section { margin-top: 14px; font-weight: 900; letter-spacing: .05em; font-size: 15px; }

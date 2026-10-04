@@ -1,4 +1,4 @@
-# A One Enterprise — Billing & Weight Calculator (v2.2, cloud sync)
+# A One Enterprise — Billing & Weight Calculator (v2.2.2, cloud sync)
 
 Offline-first PWA for counter billing. Plain HTML/CSS/JS, no build step.
 Products, customers and bills sync live between phones through Firebase (Firestore),
