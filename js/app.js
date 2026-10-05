@@ -5,7 +5,7 @@ import { scale } from './scale.js';
 import { parseProductSpeech } from './parse.js';
 import { startHindi } from './i18n.js';
 
-const APP_VERSION = '2.7.0';
+const APP_VERSION = '2.8.0';
 
 // ---------------------------------------------------------------- constants
 const UNITS = {
@@ -274,7 +274,28 @@ function itemPayTag(b, it) {
   if (b.status !== 'COMPLETED' || b.isSettled || bundleNoCharge(it) || !(b.payments || []).some(p => p.itemIds)) return '';
   return paidItemIds(b).has(it.id) ? 'PAID' : 'DUE';
 }
-const itemNames = (b, ids) => (ids || []).map(id => b.items.find(i => i.id === id)?.productName).filter(Boolean).join(', ');
+// Wire size (e.g. 1.0, 0.9, 1.3): asked for wire products and shown with the name.
+const DEFAULT_SIZES = ['0.5', '0.6', '0.7', '0.8', '0.9', '1.0', '1.1', '1.2', '1.3', '1.4', '1.5'];
+const asksSize = p => !!p && (p.hasSize ?? /wire|वायर|तार/i.test(p.name));
+const sizesFor = p => [...new Set([...DEFAULT_SIZES, ...(p?.sizes || [])])].sort((a, b) => num(a) - num(b));
+const normSize = v => {
+  const n = num(v);
+  return isNaN(n) || n <= 0 ? '' : Number.isInteger(n) ? n.toFixed(1) : String(n);
+};
+const withSize = (name, size) => (size ? `${name} · ${size}` : name);
+const itemTitle = it => withSize(it.productName, it.size);
+function rememberSize(p, size) {
+  if (!p || !size || sizesFor(p).includes(size)) return;
+  p.sizes = [...(p.sizes || []), size];
+  cloud.update('products', p.id, { sizes: p.sizes, updatedAt: now() });
+}
+function sizePicker(p, current, act, inputId) {
+  const list = sizesFor(p);
+  return `<label class="lbl">WIRE SIZE</label>
+    <div class="size-chips">${list.map(z => `<button type="button" class="pchip ${z === current ? 'on' : ''}" data-act="${act}" data-s="${z}">${z}</button>`).join('')}</div>
+    <input id="${inputId}" class="input big" inputmode="decimal" autocomplete="off" placeholder="Other size" value="${current && !list.includes(current) ? esc(current) : ''}">`;
+}
+const itemNames = (b, ids) => (ids || []).map(id => b.items.find(i => i.id === id)).filter(Boolean).map(itemTitle).join(', ');
 const payLine = (b, p) => `${p.amount < 0 ? 'Paid out' : 'Paid'} ${money(Math.abs(p.amount))} · ${fmtDate(p.at)}, ${fmtTime(p.at)}${p.method ? ' · ' + p.method : ''}${p.itemIds ? ' · for: ' + itemNames(b, p.itemIds) : ''}`;
 function removePayment(b, paymentId) {
   b.payments = b.payments.filter(p => p.id !== paymentId);
@@ -329,15 +350,16 @@ function giveBundle(d, bill) {
   const bd = {
     id: uid(), status: 'OUT', customerId: bill.customerId || null, customerName: bill.customerName || '', customerPhone: bill.customerPhone || '',
     productId: p.id, productName: p.name, rate: p.price, packing: d.packing, boxWeight: d.packing === 'BS' ? round3(num(d.box) || 0) : 0,
-    outWeight: round3(num(d.out) || 0), note: (d.note || '').trim(), outAt: at, outBy: S.user.email, updatedAt: at, billId: bill.id, itemId: uid(),
+    outWeight: round3(num(d.out) || 0), note: (d.note || '').trim(), size: d.size || '', outAt: at, outBy: S.user.email, updatedAt: at, billId: bill.id, itemId: uid(),
   };
   S.bundles.push(bd);
   cloud.put('bundles', bd);
   putBillItem(bill, {
     id: bd.itemId, billId: bill.id, productId: p.id, productName: p.name, category: p.category, unit: 'KG', priceType: 'PER_KG',
-    allowDecimal: true, quantity: 0, rate: p.price, amount: 0, isNegative: false, pending: true, bundleId: bd.id,
+    allowDecimal: true, quantity: 0, rate: p.price, amount: 0, isNegative: false, pending: true, bundleId: bd.id, size: bd.size,
     note: `${bundleGiven(bd)} · ${PENDING}`, addedAt: at, addedBy: S.user.email,
   }, bill.status === 'DRAFT' ? { status: 'ACTIVE' } : {});
+  rememberSize(p, bd.size);
   if (d.packing === 'BS' && d.saveBox && bd.boxWeight && p.boxWeight !== bd.boxWeight) {
     p.boxWeight = bd.boxWeight;
     cloud.update('products', p.id, { boxWeight: bd.boxWeight, updatedAt: at });
@@ -792,7 +814,7 @@ function viewBill(bill) {
     <button class="chip add" data-act="newBill">＋ New</button>
   </nav>
   <main class="page has-footer-lg">
-    ${bill.customerChosen ? openBundles().filter(bd => custKey(bd) === custKey(bill) && bd.billId !== bill.id).map(bd => `<a class="bundle-note" href="#/bundle/${bd.id}/${bill.id}">🧵 <span><b>${esc(bd.productName)} bundle out</b><small>${kg(bd.outWeight)} kg ${bd.packing === 'BS' ? 'BS' : 'Net'} · given ${fmtDate(bd.outAt)}</small></span><span class="link">Return &amp; bill</span></a>`).join('') : ''}
+    ${bill.customerChosen ? openBundles().filter(bd => custKey(bd) === custKey(bill) && bd.billId !== bill.id).map(bd => `<a class="bundle-note" href="#/bundle/${bd.id}/${bill.id}">🧵 <span><b>${esc(withSize(bd.productName, bd.size))} bundle out</b><small>${kg(bd.outWeight)} kg ${bd.packing === 'BS' ? 'BS' : 'Net'} · given ${fmtDate(bd.outAt)}</small></span><span class="link">Return &amp; bill</span></a>`).join('') : ''}
     <button class="cust-card" data-act="changeCustomer">
       <span class="cc-ico">👤</span>
       <span class="cc-main"><small>CUSTOMER</small><b>${esc(billName(bill))}</b>${sub ? `<small>${esc(sub)}${c && c.notes ? ' · ' + esc(c.notes) : ''}</small>` : ''}</span>
@@ -818,7 +840,7 @@ function viewBill(bill) {
 function itemRow(it) {
   const neg = it.amount < 0;
   return `<button class="item ${neg ? 'neg' : ''} ${it.pending ? 'pending' : ''}" data-act="editItem" data-id="${it.id}">
-    <span class="it-main"><span class="it-name">${esc(it.productName)}</span>
+    <span class="it-main"><span class="it-name">${esc(itemTitle(it))}</span>
     <span class="it-calc">${it.bundleId ? '<span class="tag bundle">BUNDLE</span> ' : ''}${it.pending ? '<span>Tap when wire comes back</span>' : calcOrPending(it, neg)}</span>
     ${it.note ? `<span class="it-note">${noteLines(it.note).map(l => `<span>${esc(l)}</span>`).join('')}</span>` : ''}</span>
     <span class="it-amt">${it.pending ? '⏳' : amountOrPending(it)}</span></button>`;
@@ -839,7 +861,7 @@ function receiptHtml(b) {
     <div class="r-cust">Customer: <b>${esc(billName(b))}</b>${b.customerPhone ? ` · ${esc(b.customerPhone)}` : ''}</div>
     ${(() => {
       const sec = billSections(b);
-      const line = it => `<div class="r-item ${it.amount < 0 ? 'neg' : ''}"><div class="r-name">${esc(it.productName)}${itemPayTag(b, it) ? ` <span class="tag ${itemPayTag(b, it) === 'PAID' ? 'paid' : 'due'}">${itemPayTag(b, it)}</span>` : ''}</div>
+      const line = it => `<div class="r-item ${it.amount < 0 ? 'neg' : ''}"><div class="r-name">${esc(itemTitle(it))}${itemPayTag(b, it) ? ` <span class="tag ${itemPayTag(b, it) === 'PAID' ? 'paid' : 'due'}">${itemPayTag(b, it)}</span>` : ''}</div>
         <div class="r-line"><span>${calcOrPending(it, it.amount < 0)}</span><b>${amountOrPending(it)}</b></div>${noteLines(it.note).filter(Boolean).map(l => `<div class="r-note">${esc(l)}</div>`).join('')}</div>`;
       if (!sec.scrap.length) return `<div class="r-items">${sec.sales.map(line).join('')}</div>`;
       return `${sec.sales.length ? `<div class="r-items">${sec.sales.map(line).join('')}</div>
@@ -875,7 +897,7 @@ function receiptText(b) {
     '------------------------------',
     ...(() => {
       const sec = billSections(b);
-      const line = it => `${it.productName}${itemPayTag(b, it) ? ` [${itemPayTag(b, it)}]` : ''}\n  ${calcOrPending(it, it.amount < 0)} = ${amountOrPending(it)}${it.note ? noteLines(it.note).map(l => `\n    ${l}`).join('') : ''}`;
+      const line = it => `${itemTitle(it)}${itemPayTag(b, it) ? ` [${itemPayTag(b, it)}]` : ''}\n  ${calcOrPending(it, it.amount < 0)} = ${amountOrPending(it)}${it.note ? noteLines(it.note).map(l => `\n    ${l}`).join('') : ''}`;
       if (!sec.scrap.length) return sec.sales.map(line);
       return [
         ...sec.sales.map(line), sec.sales.length && `Items total: ${money(sec.salesTotal)}`,
@@ -892,7 +914,7 @@ function receiptText(b) {
 function viewReceipt(bill, back) {
   return `${topbar(`Bill ${billLabel(bill)}`, back, `<span class="status">${bill.status}</span>`, back !== '/')}
   <main class="page">
-    ${bill.status === 'COMPLETED' ? bill.items.filter(i => i.pending && getBundle(i.bundleId)).map(i => `<a class="bundle-note" href="#/bundle/${i.bundleId}/${bill.id}">⏳ <span><b>Waiting for wire return</b><small>${esc(i.productName)} · ${esc(bundleGiven(getBundle(i.bundleId)))}</small></span><span class="link">Enter return</span></a>`).join('') : ''}
+    ${bill.status === 'COMPLETED' ? bill.items.filter(i => i.pending && getBundle(i.bundleId)).map(i => `<a class="bundle-note" href="#/bundle/${i.bundleId}/${bill.id}">⏳ <span><b>Waiting for wire return</b><small>${esc(itemTitle(i))} · ${esc(bundleGiven(getBundle(i.bundleId)))}</small></span><span class="link">Enter return</span></a>`).join('') : ''}
     ${receiptHtml(bill)}
     ${paymentsPanel(bill)}
     <div class="btn-row">
@@ -1066,6 +1088,7 @@ function viewProductForm(id) {
       <label class="lbl" for="pfBox">BOX / PACKING WEIGHT (kg) — for wire bundles</label>
       <input id="pfBox" name="boxWeight" class="input big" inputmode="decimal" value="${p.boxWeight ?? ''}" placeholder="e.g. 0.300">
       <label class="check"><input type="checkbox" name="allowDecimal" ${p.allowDecimal ? 'checked' : ''}> Allow decimal quantity (e.g. 2.5)</label>
+      <label class="check"><input type="checkbox" name="hasSize" ${asksSize(p) ? 'checked' : ''}> Ask wire size when billing (e.g. 1.0, 0.9, 1.3)</label>
       <label class="check"><input type="checkbox" name="favourite" ${p.favourite ? 'checked' : ''}> ⭐ Quick item (show at top)</label>
       <label class="check"><input type="checkbox" name="active" ${p.active ? 'checked' : ''}> Active (show when billing)</label>
       <button class="btn-big go" type="submit">SAVE PRODUCT</button>
@@ -1152,12 +1175,13 @@ function summarize(bills, r) {
     dueFromPeriod: round2(bills.filter(b => !b.isSettled).reduce((s, b) => s + b.balance, 0)),
   };
 }
+const reportKey = it => (it.productId || 'n:' + it.productName.toLowerCase()) + (it.size ? '|' + it.size : '');
 function productStats(bills) {
   const map = new Map();
   for (const b of bills) for (const it of b.items) {
     if (it.pending) continue;
-    const key = it.productId || 'n:' + it.productName.toLowerCase();
-    const e = map.get(key) || { key, name: it.productName, unit: it.unit, qty: 0, amount: 0, bills: new Set() };
+    const key = reportKey(it);
+    const e = map.get(key) || { key, name: itemTitle(it), unit: it.unit, qty: 0, amount: 0, bills: new Set() };
     if (e.unit === it.unit) e.qty = round3(e.qty + it.quantity);
     e.amount = round2(e.amount + it.amount);
     e.bills.add(b.id);
@@ -1274,8 +1298,8 @@ function viewProductReport(key) {
   const r = periodRange();
   ensureRange(r);
   const bills = billsIn(r);
-  const lines = bills.flatMap(b => b.items.filter(it => (it.productId || 'n:' + it.productName.toLowerCase()) === key).map(it => ({ it, b })));
-  const name = lines[0]?.it.productName || getProduct(key)?.name || 'Product';
+  const lines = bills.flatMap(b => b.items.filter(it => !it.pending && reportKey(it) === key).map(it => ({ it, b })));
+  const name = lines[0] ? itemTitle(lines[0].it) : getProduct(key.split('|')[0])?.name || 'Product';
   const unit = lines[0]?.it.unit || getProduct(key)?.unit || 'PCS';
   const qty = round3(lines.reduce((s, l) => s + l.it.quantity, 0));
   const amount = round2(lines.reduce((s, l) => s + l.it.amount, 0));
@@ -1363,7 +1387,7 @@ function viewDues() {
 
 // --- wire bundles
 const bundleRow = bd => `<a class="row" href="#/bundle/${bd.id}">
-  <span class="row-main"><b>${esc(bd.customerName || 'Walk-in customer')}</b><small>${esc(bd.productName)} · ${kg(bd.outWeight)} kg ${bd.packing === 'BS' ? 'BS' : 'Net'} · ${fmtDate(bd.outAt)}</small></span>
+  <span class="row-main"><b>${esc(bd.customerName || 'Walk-in customer')}</b><small>${esc(withSize(bd.productName, bd.size))} · ${kg(bd.outWeight)} kg ${bd.packing === 'BS' ? 'BS' : 'Net'} · ${fmtDate(bd.outAt)}</small></span>
   ${bd.status === 'OUT' ? `<span class="due-amt">${Math.max(0, Math.floor((Date.now() - new Date(bd.outAt)) / 864e5))} DAYS</span>` : `<span class="due-amt ok">USED<b>${kg(bd.usedKg || 0)} kg</b></span>`}<span class="chev">›</span></a>`;
 function viewBundles() {
   const out = openBundles();
@@ -1386,6 +1410,7 @@ function bundleFormHtml(d) {
   return `<label class="lbl">WIRE</label>
     <div class="ptiles">${wireProducts().map(w => `<button type="button" class="ptile ${w.id === d.productId ? 'sel' : ''}" data-act="bnPickProduct" data-id="${w.id}">
       <span class="pt-name">${esc(w.name)}</span><span class="pt-rate">${w.price ? rateText(w.price, w.priceType) : 'Enter rate'}${w.boxWeight ? ` · box ${kg(w.boxWeight)}` : ''}</span></button>`).join('') || '<p class="empty">Add wire products (unit KG) under Products first.</p>'}</div>
+    ${p && asksSize(p) ? sizePicker(p, d.size, 'bnSize', 'bnSizeIn') : ''}
     <label class="lbl" for="bnOut">WEIGHT GIVEN (kg) — as shown on the scale</label>
     <input id="bnOut" class="qty-input" inputmode="decimal" autocomplete="off" value="${esc(d.out)}" placeholder="0.000">
     <label class="lbl">PACKING</label>
@@ -1435,10 +1460,12 @@ function updateBundleNew() {
   if (!d || !$('#bnCalc')) return;
   const out = num(d.out) || 0;
   const box = d.packing === 'BS' ? num(d.box) || 0 : 0;
-  const ready = d.customerName && d.productId && out > 0 && box < out;
+  const needSize = asksSize(getProduct(d.productId)) && !d.size;
+  const ready = d.customerName && d.productId && out > 0 && box < out && !needSize;
   $('#bnCalc').innerHTML = out > 0
     ? (box ? `<span>${kg(out)} kg − box ${kg(box)} kg</span><b>Wire given: ${kg(out - box)} kg</b>` : `<b>Wire given: ${kg(out)} kg</b>`)
     : `<span>${!d.customerName ? 'Choose customer' : !d.productId ? 'Choose wire' : 'Enter weight'}</span><b>&nbsp;</b>`;
+  if (out > 0 && needSize) $('#bnCalc').innerHTML += '<span class="warn-text">Choose wire size</span>';
   $('#bnGo').disabled = !ready;
 }
 function viewBundleReturn(id, billId) {
@@ -1450,7 +1477,7 @@ function viewBundleReturn(id, billId) {
   const billLink = bill ? `<a class="btn-mid" href="#${billHref(bill)}">Open bill ${billLabel(bill)}</a>` : '';
   const head = `<section class="card">
       <p class="due-big"><b>${esc(bd.customerName || 'Walk-in customer')}</b></p>
-      <p>${esc(bd.productName)} · <b>${kg(bd.outWeight)} kg</b> ${bd.packing === 'BS' ? `BS (box ${kg(bd.boxWeight || 0)} kg)` : 'Net'}</p>
+      <p>${esc(withSize(bd.productName, bd.size))} · <b>${kg(bd.outWeight)} kg</b> ${bd.packing === 'BS' ? `BS (box ${kg(bd.boxWeight || 0)} kg)` : 'Net'}</p>
       <p class="hint">Given ${fmtDate(bd.outAt)}, ${fmtTime(bd.outAt)}${bd.note ? ' · ' + esc(bd.note) : ''}</p></section>`;
   if (bd.status !== 'OUT') {
     return `${topbar('Bundle', '/bundles')}
@@ -1627,7 +1654,7 @@ function settlementOps(key) {
     const sec = billSections(b);
     for (const it of [...sec.sales, ...sec.scrap]) {
       const tag = itemPayTag(b, it);
-      ops.push({ t: 'row', l: `${fmtTime(it.addedAt || b.createdAt)}  ${it.productName}${it.amount < 0 ? ' (scrap)' : ''}${tag ? ` [${tag}]` : ''}`, r: amountOrPending(it), size: 22 });
+      ops.push({ t: 'row', l: `${fmtTime(it.addedAt || b.createdAt)}  ${itemTitle(it)}${it.amount < 0 ? ' (scrap)' : ''}${tag ? ` [${tag}]` : ''}`, r: amountOrPending(it), size: 22 });
       ops.push({ t: 'text', s: `        ${calcOrPending(it, it.amount < 0)}`, size: 19 });
       const bd = it.bundleId ? getBundle(it.bundleId) : null;
       noteLines(it.note).filter(Boolean).forEach((l, i) => {
@@ -1644,7 +1671,7 @@ function settlementOps(key) {
   const out = openBundles().filter(bd => custKey(bd) === key);
   if (out.length) {
     ops.push({ t: 'text', s: 'WIRE STILL WITH CUSTOMER (not billed yet)', size: 21, bold: true });
-    out.forEach(bd => ops.push({ t: 'text', s: `   ${bd.productName} · ${bundleGiven(bd)} · ${when(bd.outAt)}`, size: 19 }));
+    out.forEach(bd => ops.push({ t: 'text', s: `   ${withSize(bd.productName, bd.size)} · ${bundleGiven(bd)} · ${when(bd.outAt)}`, size: 19 }));
     ops.push({ t: 'rule' });
   }
   ops.push({ t: 'text', s: 'SUMMARY', size: 24, bold: true },
@@ -1718,7 +1745,7 @@ function payItemsHtml(ctx) {
   if (list.length < 2) return '';
   return `<label class="lbl">WHICH ITEMS ARE PAID NOW? (optional)</label>
     <div class="pay-items">${list.map(it => `<label class="check"><input type="checkbox" class="payItem" value="${it.id}" data-amt="${it.amount}">
-      <span>${esc(it.productName)}</span><b class="${it.amount < 0 ? 'neg-text' : ''}">${money(it.amount)}</b></label>`).join('')}</div>
+      <span>${esc(itemTitle(it))}</span><b class="${it.amount < 0 ? 'neg-text' : ''}">${money(it.amount)}</b></label>`).join('')}</div>
     <p class="hint">Ticked items show as PAID on the bill; the rest stay DUE.</p>`;
 }
 function updatePayInfo() {
@@ -1843,7 +1870,8 @@ function openQtySheet(billId, productId, itemId = null, presetQty = null) {
     ? { name: item.productName, category: item.category, unit: item.unit, priceType: item.priceType, rate: item.rate, allowDecimal: item.allowDecimal ?? UNITS[item.unit].decimal }
     : { name: p.name, category: p.category, unit: p.unit, priceType: p.priceType, rate: p.price, allowDecimal: p.allowDecimal };
   const sign = src.rate < 0 || (!src.rate && src.category === 'SCRAP') ? -1 : 1;
-  sheetCtx = { billId, productId: item ? item.productId : p.id, itemId, addedAt: item?.addedAt, sign, ...src };
+  const prod = p || getProduct(item.productId);
+  sheetCtx = { billId, productId: item ? item.productId : p.id, itemId, addedAt: item?.addedAt, sign, askSize: asksSize(prod) || !!item?.size, size: item?.size || '', ...src };
   const neg = sign < 0;
   const needRate = !src.rate;
   const per = PRICE_TYPES[src.priceType]?.per;
@@ -1861,6 +1889,7 @@ function openQtySheet(billId, productId, itemId = null, presetQty = null) {
       <input id="rateIn" class="input big" inputmode="decimal" autocomplete="off" value="${src.rate ? Math.abs(src.rate) : ''}" placeholder="0">
       <small class="hint">For this bill only — catalogue price stays the same.</small>
     </div>
+    ${sheetCtx.askSize ? sizePicker(prod, sheetCtx.size, 'pickSize', 'sizeIn') : ''}
     <label class="lbl" for="qtyIn">${qtyWord(src.unit)} (${u})</label>
     <div class="qty-row">
       ${src.allowDecimal ? '' : '<button type="button" class="step" data-act="step" data-d="-1">−</button>'}
@@ -2071,6 +2100,15 @@ const A = {
     render(true);
   },
   bundleInBill() { openBundleSheet(R.b); },
+  pickSize(el) {
+    sheetCtx.size = el.dataset.s;
+    el.parentElement.querySelectorAll('button').forEach(b => b.classList.toggle('on', b === el));
+    $('#sizeIn').value = '';
+  },
+  bnSize(el) {
+    bnDraft.size = el.dataset.s;
+    refreshBundleForm();
+  },
   bnTypedCustomer() {
     Object.assign(bnDraft, { customerId: null, customerName: $('#bnCust').value.trim(), customerPhone: '' });
     render(true);
@@ -2081,6 +2119,7 @@ const A = {
   },
   bnPickProduct(el) {
     const p = getProduct(el.dataset.id);
+    if (bnDraft.productId !== p.id) bnDraft.size = '';
     bnDraft.productId = p.id;
     bnDraft.box = p.boxWeight != null ? String(p.boxWeight) : bnDraft.box || '0.300';
     refreshBundleForm();
@@ -2095,6 +2134,7 @@ const A = {
     const out = round3(num(d.out) || 0);
     const box = d.packing === 'BS' ? round3(num(d.box) || 0) : 0;
     if (!d.customerName || !p || !(out > 0) || box >= out) return toast('Check customer, wire and weight', 'err');
+    if (asksSize(p) && !d.size) return toast('Choose wire size', 'err');
     const inBill = !!d.billId;
     const bill = inBill ? getBill(d.billId) : openBillFor(d);
     if (!bill || !['ACTIVE', 'DRAFT'].includes(bill.status)) return toast('This bill was closed on another phone', 'err');
@@ -2126,7 +2166,7 @@ const A = {
     const item = {
       ...(sameBill ? own : {}), id: sameBill ? own.id : uid(), billId: bill.id, productId: bd.productId, productName: bd.productName,
       category: p?.category || 'WEIGHT', unit: 'KG', priceType: 'PER_KG', allowDecimal: true, quantity: f.used, rate: f.rate,
-      amount: f.amount, isNegative: false, pending: false, note: f.note, bundleId: bd.id, addedAt: sameBill ? own.addedAt : at, addedBy: S.user.email,
+      amount: f.amount, isNegative: false, pending: false, note: f.note, bundleId: bd.id, size: bd.size || '', addedAt: sameBill ? own.addedAt : at, addedBy: S.user.email,
     };
     putBillItem(bill, item, bill.status === 'DRAFT' ? { status: 'ACTIVE' } : {});
     if (bill.status === 'COMPLETED') {
@@ -2284,6 +2324,7 @@ const A = {
       return toast(`Enter ${qtyWord(ctx.unit).toLowerCase()}`, 'err');
     }
     if (!ctx.allowDecimal && !Number.isInteger(q)) return toast(`Whole numbers only for ${ctx.name}`, 'err');
+    if (ctx.askSize && !ctx.size) return toast('Choose wire size', 'err');
     const bill = getBill(ctx.billId);
     if (!bill) return toast('This bill was closed on another phone', 'err');
     const amount = lineAmount(q, rate, ctx.unit, ctx.priceType);
@@ -2291,16 +2332,18 @@ const A = {
       id: ctx.itemId || uid(), billId: bill.id, productId: ctx.productId, productName: ctx.name, category: ctx.category,
       unit: ctx.unit, priceType: ctx.priceType, allowDecimal: ctx.allowDecimal,
       quantity: q, rate, amount, isNegative: rate < 0, addedAt: ctx.addedAt || now(), addedBy: S.user.email,
+      ...(ctx.size ? { size: ctx.size } : {}),
     };
     putBillItem(bill, item, bill.status === 'DRAFT' ? { status: 'ACTIVE' } : {});
-    toast(`${ctx.itemId ? 'Updated' : '✓ Added'} ${ctx.name}  ${money(amount)}`);
+    rememberSize(getProduct(ctx.productId), ctx.size);
+    toast(`${ctx.itemId ? 'Updated' : '✓ Added'} ${withSize(ctx.name, ctx.size)}  ${money(amount)}`);
     render(true);
   },
   async removeItem() {
     const ctx = sheetCtx;
     const bill = getBill(ctx.billId);
     const it = bill.items.find(i => i.id === ctx.itemId);
-    if (!await confirmBox({ title: `Remove ${esc(it.productName)}?`, body: `${lineCalcText(it)} = ${money(it.amount)}`, ok: 'REMOVE', danger: true })) return;
+    if (!await confirmBox({ title: `Remove ${esc(itemTitle(it))}?`, body: `${lineCalcText(it)} = ${money(it.amount)}`, ok: 'REMOVE', danger: true })) return;
     dropBillItem(getBill(ctx.billId), it.id);
     toast('Item removed');
     render(true);
@@ -2725,7 +2768,7 @@ function receiptCanvas(b) {
   rule();
   const sec = billSections(b);
   const lines = list => list.forEach(it => {
-    text(it.productName + (itemPayTag(b, it) ? `  (${itemPayTag(b, it)})` : ''), { size: 25, bold: true });
+    text(itemTitle(it) + (itemPayTag(b, it) ? `  (${itemPayTag(b, it)})` : ''), { size: 25, bold: true });
     row('   ' + calcOrPending(it, it.amount < 0), amountOrPending(it));
     if (it.note) noteLines(it.note).forEach(l => text('      ' + l, { size: 20 }));
     y += 6;
@@ -2830,6 +2873,15 @@ const INPUTS = {
   bnOut: v => { bnDraft.out = v; updateBundleNew(); },
   bnBox: v => { bnDraft.box = v; updateBundleNew(); },
   bnNote: v => { bnDraft.note = v; },
+  bnSizeIn: v => {
+    bnDraft.size = normSize(v);
+    document.querySelectorAll('[data-act="bnSize"]').forEach(b => b.classList.remove('on'));
+    updateBundleNew();
+  },
+  sizeIn: v => {
+    sheetCtx.size = normSize(v);
+    document.querySelectorAll('[data-act="pickSize"]').forEach(b => b.classList.remove('on'));
+  },
   brBack: v => { bnReturn.back = v; updateBundleReturn(); },
   brRate: v => { bnReturn.rate = v; updateBundleReturn(); },
   qaName: updateQuick,
@@ -2937,7 +2989,7 @@ document.addEventListener('submit', async e => {
     Object.assign(p, {
       name, category: d.category, unit: d.unit, priceType: d.priceType, price, isNegative: price < 0,
       sku: (d.sku || '').trim(), stock: optNum(d.stock), minStock: optNum(d.minStock), boxWeight: optNum(d.boxWeight),
-      allowDecimal: !!d.allowDecimal, favourite: !!d.favourite, active: !!d.active, updatedAt: now(), needsReview: false,
+      allowDecimal: !!d.allowDecimal, hasSize: !!d.hasSize, favourite: !!d.favourite, active: !!d.active, updatedAt: now(), needsReview: false,
     });
     S.products = S.products.filter(x => x.id !== p.id).concat(p);
     cloud.put('products', p);

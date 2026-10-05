@@ -159,6 +159,8 @@ const PHRASES = {
   'Delete ALL bills?': 'सभी बिल हटाएँ?', 'DELETE BILLS': 'बिल हटाएँ', 'Deleting…': 'हटा रहे हैं…', '✓ All bills deleted': '✓ सभी बिल हट गए', 'This bill was cancelled': 'यह बिल रद्द हो चुका है',
   'All bills, payments, dues and wire bundles are erased': 'सभी बिल, भुगतान, बकाया और वायर बंडल मिट जाएँगे',
   'Products, customers and shop settings are kept. Bill numbers start again from 1.': 'सामान, ग्राहक और दुकान की सेटिंग रहेंगी। बिल नंबर फिर 1 से शुरू होंगे।',
+  'WIRE SIZE': 'वायर साइज़', 'Other size': 'दूसरा साइज़', 'Choose wire size': 'वायर साइज़ चुनें',
+  'Ask wire size when billing (e.g. 1.0, 0.9, 1.3)': 'बिल में वायर साइज़ पूछें (जैसे 1.0, 0.9, 1.3)',
   'English (India)': 'अंग्रेज़ी', 'Hindi': 'हिंदी', 'Marathi': 'मराठी', 'Gujarati': 'गुजराती', 'Punjabi': 'पंजाबी', 'Bengali': 'बांग्ला', 'Tamil': 'तमिल', 'Telugu': 'तेलुगु', 'Kannada': 'कन्नड़',
   'Connect to the internet first': 'पहले इंटरनेट चालू करें', 'Sample products already present': 'नमूना सामान पहले से है', 'All data cleared': 'सारा डेटा मिट गया',
 };

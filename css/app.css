@@ -443,3 +443,7 @@ button.tb-back { color: #fff; }
 .doc hr { border: 0; border-top: 2px dashed var(--line); margin: 8px 0; }
 .doc hr.solid { border-top: 2px solid var(--ink); }
 .doc .d-gap { height: 8px; }
+
+/* wire size chips */
+.size-chips { display: flex; flex-wrap: wrap; gap: 6px; }
+.size-chips .pchip { min-width: 58px; min-height: 48px; font-size: 17px; }

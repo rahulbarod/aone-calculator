@@ -1,4 +1,4 @@
-# A One Enterprise — Billing & Weight Calculator (v2.7, cloud sync)
+# A One Enterprise — Billing & Weight Calculator (v2.8, cloud sync)
 
 Offline-first PWA for counter billing. Plain HTML/CSS/JS, no build step.
 Products, customers and bills sync live between phones through Firebase (Firestore),
@@ -96,6 +96,12 @@ Bundles live on the bill, next to the other items:
 - Any finished bill: open it → **🗑 Delete this bill** (also removes its wire bundles and puts stock back).
 - Settings → **🗑 DELETE ALL BILLS (keep products & customers)**, type DELETE: clears bills, payments, dues and wire
   bundles on every phone; bill numbers restart from 1. (Open bills can also be removed with CANCEL.)
+
+## Wire size (v2.8)
+
+Products with "wire" in the name (or with **Ask wire size when billing** ticked on the product page) ask for a size
+(0.5 … 1.5 buttons, or type any other size — new sizes are remembered) when sold and when a bundle is given. The size
+shows with the name everywhere ("Copper Wire · 1.0") and Reports list each size separately.
 
 ## Back button
 
