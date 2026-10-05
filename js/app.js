@@ -5,7 +5,7 @@ import { scale } from './scale.js';
 import { parseProductSpeech } from './parse.js';
 import { startHindi } from './i18n.js';
 
-const APP_VERSION = '2.3.0';
+const APP_VERSION = '2.4.0';
 
 // ---------------------------------------------------------------- constants
 const UNITS = {
@@ -61,7 +61,7 @@ const SAMPLE_PRODUCTS = [
 const S = {
   user: undefined, // undefined = still checking, null = signed out
   denied: false,
-  products: [], customers: [], bills: [], olderBills: [],
+  products: [], customers: [], bills: [], olderBills: [], bundles: [],
   shop: { ...DEFAULT_SHOP }, counters: {},
   loaded: {}, fromServer: {}, pending: {},
   legacy: null, // data saved on this phone by v1 (before sync)
@@ -278,6 +278,20 @@ function duesByCustomer() {
   }
   return [...map.values()].sort((a, b) => b.balance - a.balance);
 }
+// Wire bundles: a customer takes a bundle, uses what they need and brings it
+// back; they pay for the weight difference. BS = weighed with its box,
+// Net = wire only. The box weight is deducted only when it doesn't come back.
+const getBundle = id => S.bundles.find(b => b.id === id);
+const openBundles = () => S.bundles.filter(b => b.status === 'OUT').sort(byTime('outAt'));
+const kg = q => fmtQty(round3(q), 'KG');
+function bundleCalc(bd, retKg, withBox) {
+  const box = bd.packing === 'BS' ? bd.boxWeight || 0 : 0;
+  const back = retKg > 0 ? retKg : 0;
+  const deductBox = box > 0 && !(back > 0 && withBox);
+  const used = round3(bd.outWeight - back - (deductBox ? box : 0));
+  const note = `Bundle ${bd.packing === 'BS' ? 'BS' : 'Net'} ${kg(bd.outWeight)}${deductBox ? ` − box ${kg(box)}` : ''}${back ? ` − returned ${kg(back)}` : ''} = ${kg(used)} kg used`;
+  return { box, back, deductBox, used, note };
+}
 const totalDue = () => round2(unpaidBills().reduce((s, b) => s + b.balance, 0));
 function deleteBill(b) {
   S.bills = S.bills.filter(x => x.id !== b.id);
@@ -358,6 +372,7 @@ function onData(name, rows, meta) {
       }
     }
   }
+  else if (name === 'bundles') S.bundles = rows;
   else if (name === 'meta') {
     const { id, ...shop } = rows.find(r => r.id === 'shop') || {};
     S.shop = { ...DEFAULT_SHOP, ...shop };
@@ -429,6 +444,7 @@ function render(keepScroll = false) {
   window.scrollTo(0, keepScroll ? y : 0);
   updateSyncBadge();
   if (a === 'settings') fillStorageInfo();
+  if (a === 'bundle') b === 'new' ? updateBundleNew() : updateBundleReturn();
   const chip = $('.pchip.on');
   if (chip) chip.parentElement.scrollLeft = chip.offsetLeft - 60;
 }
@@ -458,6 +474,8 @@ function route(a, b, c) {
     case 'reports': return b === 'product' ? viewProductReport(decodeURIComponent(c)) : viewReports();
     case 'dues': return viewDues();
     case 'statement': return viewStatement(decodeURIComponent(b));
+    case 'bundles': return viewBundles();
+    case 'bundle': return b === 'new' ? viewBundleNew() : viewBundleReturn(b, c);
     case 'customers': return viewCustomers();
     case 'customer': return viewCustomerForm(b);
     case 'products': return viewProducts();
@@ -536,6 +554,7 @@ function viewHome() {
     <a class="sec-head" href="#/bills"><span>ACTIVE BILLS${act.length ? `<i class="count">${act.length}</i>` : ''}</span><span class="more">All ›</span></a>
     ${act.length ? `<div class="list">${act.slice(0, 6).map(billCard).join('')}</div>` : '<p class="empty">No open bills right now</p>'}
     ${act.length > 6 ? `<a class="btn-text" href="#/bills">+${act.length - 6} more bills</a>` : ''}
+    <a class="row bundle-row" href="#/bundles"><span class="ti">🧵</span><span class="row-main"><b>WIRE BUNDLES</b><small>${openBundles().length ? `${plural(openBundles().length, 'bundle')} out with customers` : 'Give a bundle · bill on return'}</small></span><span class="chev">›</span></a>
     <nav class="grid2">
       <a class="tile" href="#/reports"><span class="ti">📊</span>REPORTS</a>
       <a class="tile ${due ? 'has-due' : ''}" href="#/dues"><span class="ti">💰</span>DUES<small>${due ? money(due) : 'None'}</small></a>
@@ -651,6 +670,7 @@ function viewBill(bill) {
     <button class="chip add" data-act="newBill">＋ New</button>
   </nav>
   <main class="page has-footer-lg">
+    ${bill.customerChosen ? openBundles().filter(bd => custKey(bd) === custKey(bill)).map(bd => `<a class="bundle-note" href="#/bundle/${bd.id}/${bill.id}">🧵 <span><b>${esc(bd.productName)} bundle out</b><small>${kg(bd.outWeight)} kg ${bd.packing === 'BS' ? 'BS' : 'Net'} · given ${fmtDate(bd.outAt)}</small></span><span class="link">Return &amp; bill</span></a>`).join('') : ''}
     <button class="cust-card" data-act="changeCustomer">
       <span class="cc-ico">👤</span>
       <span class="cc-main"><small>CUSTOMER</small><b>${esc(billName(bill))}</b>${sub ? `<small>${esc(sub)}${c && c.notes ? ' · ' + esc(c.notes) : ''}</small>` : ''}</span>
@@ -677,7 +697,7 @@ function itemRow(it) {
   const neg = it.amount < 0;
   return `<button class="item ${neg ? 'neg' : ''}" data-act="editItem" data-id="${it.id}">
     <span class="it-main"><span class="it-name">${esc(it.productName)}</span>
-    <span class="it-calc">${lineCalcText(it, neg)}</span></span>
+    <span class="it-calc">${lineCalcText(it, neg)}</span>${it.note ? `<span class="it-note">🧵 ${esc(it.note)}</span>` : ''}</span>
     <span class="it-amt">${money(it.amount)}</span></button>`;
 }
 
@@ -694,7 +714,7 @@ function receiptHtml(b) {
     ${(() => {
       const sec = billSections(b);
       const line = it => `<div class="r-item ${it.amount < 0 ? 'neg' : ''}"><div class="r-name">${esc(it.productName)}</div>
-        <div class="r-line"><span>${lineCalcText(it, it.amount < 0)}</span><b>${money(it.amount)}</b></div></div>`;
+        <div class="r-line"><span>${lineCalcText(it, it.amount < 0)}</span><b>${money(it.amount)}</b></div>${it.note ? `<div class="r-note">${esc(it.note)}</div>` : ''}</div>`;
       if (!sec.scrap.length) return `<div class="r-items">${sec.sales.map(line).join('')}</div>`;
       return `${sec.sales.length ? `<div class="r-items">${sec.sales.map(line).join('')}</div>
         <div class="r-subtotal"><span>Items total</span><b>${money(sec.salesTotal)}</b></div>` : ''}
@@ -728,7 +748,7 @@ function receiptText(b) {
     '------------------------------',
     ...(() => {
       const sec = billSections(b);
-      const line = it => `${it.productName}\n  ${lineCalcText(it, it.amount < 0)} = ${money(it.amount)}`;
+      const line = it => `${it.productName}\n  ${lineCalcText(it, it.amount < 0)} = ${money(it.amount)}${it.note ? `\n  (${it.note})` : ''}`;
       if (!sec.scrap.length) return sec.sales.map(line);
       return [
         ...sec.sales.map(line), sec.sales.length && `Items total: ${money(sec.salesTotal)}`,
@@ -914,6 +934,8 @@ function viewProductForm(id) {
         <div><label class="lbl" for="pfStock">STOCK (optional)</label><input id="pfStock" name="stock" class="input big" inputmode="decimal" value="${p.stock ?? ''}"></div>
         <div><label class="lbl" for="pfMin">MIN. STOCK</label><input id="pfMin" name="minStock" class="input big" inputmode="decimal" value="${p.minStock ?? ''}"></div>
       </div>
+      <label class="lbl" for="pfBox">BOX / PACKING WEIGHT (kg) — for wire bundles</label>
+      <input id="pfBox" name="boxWeight" class="input big" inputmode="decimal" value="${p.boxWeight ?? ''}" placeholder="e.g. 0.300">
       <label class="check"><input type="checkbox" name="allowDecimal" ${p.allowDecimal ? 'checked' : ''}> Allow decimal quantity (e.g. 2.5)</label>
       <label class="check"><input type="checkbox" name="favourite" ${p.favourite ? 'checked' : ''}> ⭐ Quick item (show at top)</label>
       <label class="check"><input type="checkbox" name="active" ${p.active ? 'checked' : ''}> Active (show when billing)</label>
@@ -1173,6 +1195,10 @@ function viewStatement(key) {
         <button class="btn-big go" data-act="payCustomer" data-key="${esc(key)}">₹ RECEIVE PAYMENT</button>`
         : due < 0 ? `<p class="due-big">You owe <b>${money(Math.abs(due))}</b></p>` : '<p class="settled-note">✓ No dues</p>'}
     </section>
+    ${(() => {
+      const out = openBundles().filter(bd => custKey(bd) === key);
+      return out.length ? `<div class="sec-label">WIRE BUNDLES OUT</div><div class="list">${out.map(bundleRow).join('')}</div>` : '';
+    })()}
     ${unpaid.length ? `<div class="sec-label">UNPAID BILLS</div><div class="list">${unpaid.map(billRow).join('')}</div>` : ''}
     ${c ? `<div class="btn-row"><button class="btn-mid" data-act="billForCustomer" data-id="${c.id}">＋ New bill</button><a class="btn-mid" href="#/customer/${c.id}">✎ Edit details</a></div>` : ''}
     <div class="sec-label">BILLS</div>
@@ -1202,6 +1228,131 @@ function viewDues() {
       <span class="row-main"><b>${esc(g.name)}</b><small>${plural(g.bills.length, 'bill')} · oldest ${days(g.bills[0].completedAt)} days</small></span>
       <span class="due-amt">${g.balance < 0 ? 'WE OWE' : 'DUE'}<b>${money(Math.abs(g.balance))}</b></span><span class="chev">›</span></a>`).join('')}</div>` : '<p class="empty">🎉 Nobody owes anything</p>'}
   </main>`;
+}
+
+// --- wire bundles
+const bundleRow = bd => `<a class="row" href="#/bundle/${bd.id}">
+  <span class="row-main"><b>${esc(bd.customerName || 'Walk-in customer')}</b><small>${esc(bd.productName)} · ${kg(bd.outWeight)} kg ${bd.packing === 'BS' ? 'BS' : 'Net'} · ${fmtDate(bd.outAt)}</small></span>
+  ${bd.status === 'OUT' ? `<span class="due-amt">${Math.max(0, Math.floor((Date.now() - new Date(bd.outAt)) / 864e5))} DAYS</span>` : `<span class="due-amt ok">USED<b>${kg(bd.usedKg || 0)} kg</b></span>`}<span class="chev">›</span></a>`;
+function viewBundles() {
+  const out = openBundles();
+  const back = S.bundles.filter(b => b.status === 'RETURNED').sort(byTime('returnAt')).reverse().slice(0, 50);
+  return `${topbar('Wire bundles', '/')}
+  <main class="page">
+    <a class="btn-big go" href="#/bundle/new">＋ GIVE BUNDLE</a>
+    <div class="sec-label">OUT WITH CUSTOMERS</div>
+    ${out.length ? `<div class="list">${out.map(bundleRow).join('')}</div>` : '<p class="empty">No bundles out</p>'}
+    ${back.length ? `<div class="sec-label">RETURNED (RECENT)</div><div class="list">${back.map(bundleRow).join('')}</div>` : ''}
+  </main>`;
+}
+// Draft for the "give bundle" screen survives re-renders while typing.
+let bnDraft = null;
+const wireProducts = () => S.products.filter(p => p.active && (p.unit === 'KG' || p.category === 'WEIGHT') && p.price >= 0)
+  .sort((a, b) => (b.boxWeight != null) - (a.boxWeight != null) || a.name.localeCompare(b.name));
+function viewBundleNew() {
+  if (!bnDraft) bnDraft = { customerId: null, customerName: '', customerPhone: '', productId: null, packing: 'BS', out: '', box: '', saveBox: true, note: '' };
+  const d = bnDraft;
+  const p = d.productId ? getProduct(d.productId) : null;
+  return `${topbar('Give bundle', '/bundles')}
+  <main class="page">
+    <label class="lbl">CUSTOMER</label>
+    ${d.customerName ? `<div class="pick-done"><b>${esc(d.customerName)}</b><button type="button" class="link" data-act="bnClearCustomer">change</button></div>`
+      : `<div class="search-row"><input id="bnCust" class="input big" type="search" placeholder="Type or 🎤 speak name" autocomplete="off">${micBtn('bnCust')}</div>
+         <div id="bnCustResults" class="list">${bnCustomerResults('')}</div>`}
+    <label class="lbl">WIRE</label>
+    <div class="ptiles">${wireProducts().map(w => `<button type="button" class="ptile ${w.id === d.productId ? 'sel' : ''}" data-act="bnPickProduct" data-id="${w.id}">
+      <span class="pt-name">${esc(w.name)}</span><span class="pt-rate">${w.price ? rateText(w.price, w.priceType) : 'Enter rate'}${w.boxWeight ? ` · box ${kg(w.boxWeight)}` : ''}</span></button>`).join('') || '<p class="empty">Add wire products (unit KG) under Products first.</p>'}</div>
+    <label class="lbl" for="bnOut">WEIGHT GIVEN (kg) — as shown on the scale</label>
+    <input id="bnOut" class="qty-input" inputmode="decimal" autocomplete="off" value="${esc(d.out)}" placeholder="0.000">
+    <label class="lbl">PACKING</label>
+    <div class="seg sign">
+      <button type="button" class="${d.packing === 'BS' ? 'on' : ''}" data-act="bnPacking" data-p="BS">BS — with box</button>
+      <button type="button" class="${d.packing === 'NET' ? 'on' : ''}" data-act="bnPacking" data-p="NET">Net — wire only</button>
+    </div>
+    ${d.packing === 'BS' ? `<label class="lbl" for="bnBox">BOX WEIGHT (kg)</label>
+      <input id="bnBox" class="input big" inputmode="decimal" autocomplete="off" value="${esc(d.box)}" placeholder="0.300">
+      ${p ? `<label class="check"><input type="checkbox" id="bnSaveBox" ${d.saveBox ? 'checked' : ''}> Remember this box weight for ${esc(p.name)}</label>` : ''}` : ''}
+    <label class="lbl" for="bnNote">NOTE (optional)</label>
+    <input id="bnNote" class="input big" autocomplete="off" value="${esc(d.note)}" placeholder="e.g. for motor rewinding">
+    <div class="calc" id="bnCalc"></div>
+    <button type="button" class="btn-big go" id="bnGo" data-act="bnGive">GIVE BUNDLE</button>
+  </main>`;
+}
+function bnCustomerResults(q) {
+  const list = searchCustomers(q).slice(0, 8);
+  let html = list.map(c => `<button type="button" class="row" data-act="bnPickCustomer" data-id="${c.id}"><span class="row-main"><b>${esc(c.name)}</b>${c.phone ? `<small>${esc(c.phone)}</small>` : ''}</span><span class="chev">›</span></button>`).join('');
+  if (q.trim()) html += `<button type="button" class="row accent" data-act="bnTypedCustomer"><span class="row-main"><b>Use “${esc(q.trim())}”</b><small>One-off — not saved to customers</small></span><span class="chev">›</span></button>`;
+  return html || '<p class="empty">No saved customers yet.<br>Type or speak a name above.</p>';
+}
+function updateBundleNew() {
+  const d = bnDraft;
+  if (!d || !$('#bnCalc')) return;
+  const out = num(d.out) || 0;
+  const box = d.packing === 'BS' ? num(d.box) || 0 : 0;
+  const ready = d.customerName && d.productId && out > 0 && box < out;
+  $('#bnCalc').innerHTML = out > 0
+    ? (box ? `${kg(out)} kg − box ${kg(box)} kg<b>Wire given: ${kg(out - box)} kg</b>` : `<b>Wire given: ${kg(out)} kg</b>`)
+    : `<span>${!d.customerName ? 'Choose customer' : !d.productId ? 'Choose wire' : 'Enter weight'}</span><b>&nbsp;</b>`;
+  $('#bnGo').disabled = !ready;
+}
+function viewBundleReturn(id, billId) {
+  const bd = getBundle(id);
+  if (!bd) return S.loaded.bundles ? go('/bundles', true) : '<div class="boot">Loading…</div>';
+  const p = getProduct(bd.productId);
+  const head = `<section class="card">
+      <p class="due-big"><b>${esc(bd.customerName || 'Walk-in customer')}</b></p>
+      <p>${esc(bd.productName)} · <b>${kg(bd.outWeight)} kg</b> ${bd.packing === 'BS' ? `BS (box ${kg(bd.boxWeight || 0)} kg)` : 'Net'}</p>
+      <p class="hint">Given ${fmtDate(bd.outAt)}, ${fmtTime(bd.outAt)}${bd.note ? ' · ' + esc(bd.note) : ''}</p></section>`;
+  if (bd.status !== 'OUT') {
+    return `${topbar('Bundle', '/bundles')}
+    <main class="page">${head}
+      <section class="card"><h2>Returned ${fmtDate(bd.returnAt)}</h2>
+        <p>${esc(bd.returnNote || '')}</p>
+        ${bd.billId && getBill(bd.billId) ? `<a class="btn-mid" href="#/${['ACTIVE', 'DRAFT'].includes(getBill(bd.billId).status) ? 'bill' : 'receipt'}/${bd.billId}">Open bill</a>` : ''}</section>
+    </main>`;
+  }
+  if (!bnReturn || bnReturn.id !== id) bnReturn = { id, mode: 'some', back: '', withBox: true, rate: String(p?.price || bd.rate || '') };
+  const r = bnReturn;
+  return `${topbar('Return bundle', billId ? `/bill/${billId}` : '/bundles')}
+  <main class="page">${head}
+    <div class="seg sign">
+      <button type="button" class="${r.mode === 'some' ? 'on' : ''}" data-act="brMode" data-m="some">Wire returned</button>
+      <button type="button" class="${r.mode === 'all' ? 'on' : ''}" data-act="brMode" data-m="all">Used all</button>
+    </div>
+    ${r.mode === 'some' ? `<label class="lbl" for="brBack">WEIGHT RETURNED (kg)</label>
+      <input id="brBack" class="qty-input" inputmode="decimal" autocomplete="off" value="${esc(r.back)}" placeholder="0.000">
+      ${bd.packing === 'BS' ? `<label class="check"><input type="checkbox" id="brWithBox" ${r.withBox ? 'checked' : ''}> Returned with the box</label>` : ''}` : ''}
+    <label class="lbl" for="brRate">RATE ₹ / kg</label>
+    <input id="brRate" class="input big" inputmode="decimal" autocomplete="off" value="${esc(r.rate)}">
+    <div class="calc" id="brCalc"></div>
+    <button type="button" class="btn-big go" id="brGo" data-act="brConfirm" data-bill="${billId || ''}">ADD TO CUSTOMER'S BILL</button>
+    <button type="button" class="btn-text danger" data-act="brDelete">Delete this bundle entry</button>
+  </main>`;
+}
+let bnReturn = null;
+function readReturn() {
+  const bd = getBundle(bnReturn.id);
+  const back = bnReturn.mode === 'all' ? 0 : num(bnReturn.back) || 0;
+  const c = bundleCalc(bd, back, bnReturn.withBox);
+  const rate = num(bnReturn.rate) || 0;
+  return { bd, ...c, rate, amount: lineAmount(c.used, rate, 'KG', 'PER_KG') };
+}
+function updateBundleReturn() {
+  if (!bnReturn || !$('#brCalc')) return;
+  const f = readReturn();
+  const typed = bnReturn.mode === 'all' || num(bnReturn.back) > 0;
+  const ok = typed && f.used >= 0 && f.rate > 0;
+  $('#brCalc').innerHTML = !typed ? '<span>Enter weight returned</span><b>&nbsp;</b>'
+    : f.used < 0 ? `<span class="neg-text">Returned more than given — check the weight</span><b>&nbsp;</b>`
+    : `<span>${esc(f.note)}</span><b>${kg(f.used)} kg × ${money(f.rate)} = ${money(f.amount)}</b>`;
+  $('#brGo').disabled = !ok;
+  $('#brGo').textContent = typed && f.used === 0 ? 'CLOSE BUNDLE (NOTHING USED)' : 'ADD TO CUSTOMER\'S BILL';
+}
+function reopenBundle(id) {
+  const bd = getBundle(id);
+  if (!bd) return;
+  Object.assign(bd, { status: 'OUT', billId: null });
+  cloud.update('bundles', id, { status: 'OUT', billId: null, itemId: null, returnAt: null, returnNote: null, usedKg: null, updatedAt: now() });
 }
 
 // --- receive / record a payment
@@ -1563,6 +1714,96 @@ const A = {
     setBillCustomer({ id: null, name, phone, type: 'ONE_OFF' });
   },
 
+  // --- wire bundles
+  bnPickCustomer(el) {
+    const c = getCustomer(el.dataset.id);
+    Object.assign(bnDraft, { customerId: c.id, customerName: c.name, customerPhone: c.phone || '' });
+    render(true);
+  },
+  bnTypedCustomer() {
+    Object.assign(bnDraft, { customerId: null, customerName: $('#bnCust').value.trim(), customerPhone: '' });
+    render(true);
+  },
+  bnClearCustomer() {
+    Object.assign(bnDraft, { customerId: null, customerName: '', customerPhone: '' });
+    render(true);
+  },
+  bnPickProduct(el) {
+    const p = getProduct(el.dataset.id);
+    bnDraft.productId = p.id;
+    bnDraft.box = p.boxWeight != null ? String(p.boxWeight) : bnDraft.box || '0.300';
+    render(true);
+  },
+  bnPacking(el) {
+    bnDraft.packing = el.dataset.p;
+    render(true);
+  },
+  bnGive() {
+    const d = bnDraft;
+    const p = getProduct(d.productId);
+    const out = round3(num(d.out) || 0);
+    const box = d.packing === 'BS' ? round3(num(d.box) || 0) : 0;
+    if (!d.customerName || !p || !(out > 0) || box >= out) return toast('Check customer, wire and weight', 'err');
+    const bd = {
+      id: uid(), status: 'OUT', customerId: d.customerId, customerName: d.customerName, customerPhone: d.customerPhone,
+      productId: p.id, productName: p.name, rate: p.price, packing: d.packing, boxWeight: box, outWeight: out,
+      note: d.note.trim(), outAt: now(), outBy: S.user.email, updatedAt: now(),
+    };
+    S.bundles.push(bd);
+    cloud.put('bundles', bd);
+    if (d.packing === 'BS' && d.saveBox && box && p.boxWeight !== box) cloud.update('products', p.id, { boxWeight: box, updatedAt: now() });
+    bnDraft = null;
+    toast(`✓ Bundle given to ${bd.customerName}: ${kg(out)} kg`);
+    go('/bundles', true);
+  },
+  brMode(el) {
+    bnReturn.mode = el.dataset.m;
+    render(true);
+  },
+  brConfirm(el) {
+    const f = readReturn();
+    const bd = f.bd;
+    if (bd.status !== 'OUT') return toast('This bundle was already returned', 'err');
+    if (f.used < 0 || !(f.rate > 0)) return toast('Check the weight and rate', 'err');
+    const at = now();
+    const closed = { status: 'RETURNED', returnWeight: f.back, returnedWithBox: bnReturn.withBox, usedKg: f.used, rate: f.rate, amount: f.amount, returnNote: f.note, returnAt: at, returnBy: S.user.email, updatedAt: at };
+    if (f.used === 0) {
+      Object.assign(bd, closed);
+      cloud.update('bundles', bd.id, closed);
+      bnReturn = null;
+      toast('Bundle closed — nothing used');
+      return go('/bundles', true);
+    }
+    // Add to the bill we came from, else the customer's open bill, else a new one.
+    let bill = getBill(el.dataset.bill);
+    if (!bill || !['ACTIVE', 'DRAFT'].includes(bill.status)) bill = activeBills().filter(b => b.customerChosen && custKey(b) === custKey(bd)).pop();
+    if (!bill) {
+      bill = createBill();
+      updateBill(bill, { customerChosen: true, customerId: bd.customerId, customerName: bd.customerName, customerPhone: bd.customerPhone || '', customerType: bd.customerId ? 'REGULAR' : 'ONE_OFF' });
+    }
+    const p = getProduct(bd.productId);
+    const item = {
+      id: uid(), billId: bill.id, productId: bd.productId, productName: bd.productName, category: p?.category || 'WEIGHT',
+      unit: 'KG', priceType: 'PER_KG', allowDecimal: true, quantity: f.used, rate: f.rate, amount: f.amount,
+      isNegative: false, note: f.note, bundleId: bd.id, addedAt: at, addedBy: S.user.email,
+    };
+    putBillItem(bill, item, bill.status === 'DRAFT' ? { status: 'ACTIVE' } : {});
+    Object.assign(bd, closed, { billId: bill.id });
+    cloud.update('bundles', bd.id, { ...closed, billId: bill.id, itemId: item.id });
+    bnReturn = null;
+    toast(`✓ ${kg(f.used)} kg added to bill  ${money(f.amount)}`);
+    go(`/bill/${bill.id}`, true);
+  },
+  async brDelete() {
+    const bd = getBundle(bnReturn.id);
+    if (!await confirmBox({ title: 'Delete this bundle entry?', body: `${esc(bd.customerName)} · ${esc(bd.productName)} ${kg(bd.outWeight)} kg. Use this only if it was entered by mistake.`, ok: 'DELETE', danger: true })) return;
+    S.bundles = S.bundles.filter(b => b.id !== bd.id);
+    cloud.remove('bundles', bd.id);
+    bnReturn = null;
+    toast('Bundle entry deleted');
+    go('/bundles', true);
+  },
+
   // --- quick-add new product while billing
   quickAdd(el) { openQuickAdd(R.b, el?.dataset.name || $('#prodSearch')?.value.trim() || ''); },
   quickAddVoice() {
@@ -1692,7 +1933,8 @@ const A = {
     const it = bill.items.find(i => i.id === ctx.itemId);
     if (!await confirmBox({ title: `Remove ${esc(it.productName)}?`, body: `${lineCalcText(it)} = ${money(it.amount)}`, ok: 'REMOVE', danger: true })) return;
     dropBillItem(getBill(ctx.billId), it.id);
-    toast('Item removed');
+    if (it.bundleId) reopenBundle(it.bundleId);
+    toast(it.bundleId ? 'Item removed — bundle is back in the list' : 'Item removed');
     render(true);
   },
 
@@ -1731,6 +1973,7 @@ const A = {
     if (b) {
       if (b.items.length) updateBill(b, { status: 'CANCELLED', cancelledBy: S.user.email });
       else deleteBill(b);
+      b.items.filter(it => it.bundleId).forEach(it => reopenBundle(it.bundleId));
     }
     toast('Bill cancelled');
     go('/', true);
@@ -2002,7 +2245,7 @@ function receiptCanvas(b) {
   const P = 28;
   const c = document.createElement('canvas');
   c.width = W;
-  c.height = 900 + b.items.length * 140 + (b.payments?.length || 0) * 40;
+  c.height = 900 + b.items.length * 170 + (b.payments?.length || 0) * 40;
   const g = c.getContext('2d');
   g.fillStyle = '#fff';
   g.fillRect(0, 0, W, c.height);
@@ -2065,6 +2308,7 @@ function receiptCanvas(b) {
   const lines = list => list.forEach(it => {
     text(it.productName, { size: 25, bold: true });
     row('   ' + lineCalcText(it, it.amount < 0), money(it.amount));
+    if (it.note) text('   ' + it.note, { size: 20 });
     y += 6;
   });
   lines(sec.sales);
@@ -2160,6 +2404,12 @@ const INPUTS = {
   qtyIn: updateCalc,
   rateIn: updateCalc,
   payIn: updatePayInfo,
+  bnCust: v => ($('#bnCustResults').innerHTML = bnCustomerResults(v)),
+  bnOut: v => { bnDraft.out = v; updateBundleNew(); },
+  bnBox: v => { bnDraft.box = v; updateBundleNew(); },
+  bnNote: v => { bnDraft.note = v; },
+  brBack: v => { bnReturn.back = v; updateBundleReturn(); },
+  brRate: v => { bnReturn.rate = v; updateBundleReturn(); },
   qaName: updateQuick,
   qaQty: updateQuick,
   qaPrice: updateQuick,
@@ -2195,6 +2445,11 @@ document.addEventListener('change', async e => {
     S.shop[t.dataset.shop] = value;
     cloud.setMeta('shop', { [t.dataset.shop]: value });
     toast('✓ Saved for all phones');
+  } else if (t.id === 'bnSaveBox') {
+    bnDraft.saveBox = t.checked;
+  } else if (t.id === 'brWithBox') {
+    bnReturn.withBox = t.checked;
+    updateBundleReturn();
   } else if (t.id === 'qaScrap' || t.id === 'qaSave') {
     updateQuick();
   } else if (t.dataset.rep) {
@@ -2252,7 +2507,7 @@ document.addEventListener('submit', async e => {
     const price = Number(d.sign) * mag || 0;
     Object.assign(p, {
       name, category: d.category, unit: d.unit, priceType: d.priceType, price, isNegative: price < 0,
-      sku: (d.sku || '').trim(), stock: optNum(d.stock), minStock: optNum(d.minStock),
+      sku: (d.sku || '').trim(), stock: optNum(d.stock), minStock: optNum(d.minStock), boxWeight: optNum(d.boxWeight),
       allowDecimal: !!d.allowDecimal, favourite: !!d.favourite, active: !!d.active, updatedAt: now(), needsReview: false,
     });
     S.products = S.products.filter(x => x.id !== p.id).concat(p);
@@ -2313,7 +2568,7 @@ function init() {
   cloud.watchAuth(user => {
     if (unsubscribe) unsubscribe();
     unsubscribe = null;
-    Object.assign(S, { user, denied: false, products: [], customers: [], bills: [], olderBills: [], loaded: {}, fromServer: {}, pending: {} });
+    Object.assign(S, { user, denied: false, products: [], customers: [], bills: [], olderBills: [], bundles: [], loaded: {}, fromServer: {}, pending: {} });
     if (user) unsubscribe = cloud.subscribe(onData, cloud.onError, recentCutoff());
     render();
   });

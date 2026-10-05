@@ -130,6 +130,22 @@ const PHRASES = {
   'Microphone permission denied — please type the details': 'माइक की अनुमति नहीं — टाइप करें', 'Voice needs internet — please type the details': 'बोलकर लिखने के लिए इंटरनेट चाहिए — टाइप करें',
   'Voice input failed — please type the details': 'बोलकर लिखना नहीं हुआ — टाइप करें',
   'Needs internet to load older bills': 'पुराने बिल देखने के लिए इंटरनेट चाहिए', 'No older bills': 'और पुराने बिल नहीं',
+  // wire bundles
+  'WIRE BUNDLES': 'वायर बंडल', 'Give a bundle · bill on return': 'बंडल दें · वापसी पर बिल', 'Wire bundles': 'वायर बंडल',
+  '＋ GIVE BUNDLE': '＋ बंडल दें', 'OUT WITH CUSTOMERS': 'ग्राहकों के पास', 'No bundles out': 'कोई बंडल बाहर नहीं', 'RETURNED (RECENT)': 'वापस आए (हाल के)',
+  'Give bundle': 'बंडल दें', 'WIRE': 'वायर', 'WEIGHT GIVEN (kg) — as shown on the scale': 'दिया गया वज़न (kg) — कांटे पर जितना दिखे',
+  'PACKING': 'पैकिंग', 'BS — with box': 'BS — डिब्बे के साथ', 'Net — wire only': 'Net — सिर्फ़ वायर', 'BOX WEIGHT (kg)': 'डिब्बे का वज़न (kg)',
+  'NOTE (optional)': 'नोट (ज़रूरी नहीं)', 'e.g. for motor rewinding': 'जैसे मोटर वाइंडिंग के लिए', 'GIVE BUNDLE': 'बंडल दें',
+  'Choose customer': 'ग्राहक चुनें', 'Choose wire': 'वायर चुनें', 'Enter weight': 'वज़न डालें', 'Return bundle': 'बंडल वापसी', 'Bundle': 'बंडल',
+  'Wire returned': 'वायर वापस आया', 'Used all': 'पूरा इस्तेमाल', 'WEIGHT RETURNED (kg)': 'वापस आया वज़न (kg)', 'Returned with the box': 'डिब्बे के साथ वापस आया',
+  'RATE ₹ / kg': 'रेट ₹ / kg', "ADD TO CUSTOMER'S BILL": 'ग्राहक के बिल में जोड़ें', 'CLOSE BUNDLE (NOTHING USED)': 'बंडल बंद करें (कुछ इस्तेमाल नहीं)',
+  'Delete this bundle entry': 'यह बंडल एंट्री हटाएँ', 'Delete this bundle entry?': 'यह बंडल एंट्री हटाएँ?', 'Enter weight returned': 'वापस आया वज़न डालें',
+  'Returned more than given — check the weight': 'दिए से ज़्यादा वापस — वज़न जाँचें', 'Return & bill': 'वापसी और बिल', 'WIRE BUNDLES OUT': 'बाहर गए वायर बंडल',
+  'Open bill': 'बिल खोलें', 'USED': 'इस्तेमाल', 'DAYS': 'दिन', 'Bundle closed — nothing used': 'बंडल बंद — कुछ इस्तेमाल नहीं', 'Bundle entry deleted': 'बंडल एंट्री हटाई',
+  'This bundle was already returned': 'यह बंडल पहले ही वापस आ चुका है', 'Check customer, wire and weight': 'ग्राहक, वायर और वज़न जाँचें',
+  'Check the weight and rate': 'वज़न और रेट जाँचें', 'Item removed — bundle is back in the list': 'आइटम हटाया — बंडल फिर से सूची में है',
+  'Add wire products (unit KG) under Products first.': 'पहले "सामान" में वायर (यूनिट KG) जोड़ें।', 'BOX / PACKING WEIGHT (kg) — for wire bundles': 'डिब्बे/पैकिंग का वज़न (kg) — वायर बंडल के लिए',
+  'Walk-in customer': 'राह चलता ग्राहक',
   'English (India)': 'अंग्रेज़ी', 'Hindi': 'हिंदी', 'Marathi': 'मराठी', 'Gujarati': 'गुजराती', 'Punjabi': 'पंजाबी', 'Bengali': 'बांग्ला', 'Tamil': 'तमिल', 'Telugu': 'तेलुगु', 'Kannada': 'कन्नड़',
   'Connect to the internet first': 'पहले इंटरनेट चालू करें', 'Sample products already present': 'नमूना सामान पहले से है', 'All data cleared': 'सारा डेटा मिट गया',
 };
@@ -166,6 +182,13 @@ const PATTERNS = [
   [/^New bills will be (.*)$/, 'नए बिल: $1'], [/^Added (\d+ .*)$/, 'जोड़े: $1'], [/^✓ (.*): (₹.*) → (₹.*)$/, '✓ $1: $2 → $3'],
   [/^Saved on this phone before sync: (.*)\.$/, 'सिंक से पहले इस फ़ोन में सेव: $1।'],
   [/^(₹[\d,.]+) on (.*)\. The bill will show as due again\.$/, '$2 का $1। बिल फिर से बकाया दिखेगा।'],
+  [/\b(\d+) bundles? out with customers$/, '$1 बंडल ग्राहकों के पास'], [/^(.*) bundle out$/, '$1 बंडल बाहर'], [/^Remember this box weight for (.*)$/, '$1 के लिए यह डिब्बे का वज़न याद रखें'],
+  [/^ ?BS \(box (.*)\)$/, ' BS (डिब्बा $1)'], [/^(.*) kg − box (.*) kg$/, '$1 kg − डिब्बा $2 kg'],
+  [/^Wire given: (.*)$/, 'दिया गया वायर: $1'], [/^Returned (\d.*)$/, 'वापस आया: $1'], [/^Given (.*)$/, 'दिया: $1'], [/ · given /, ' · दिया '],
+  [/^✓ Bundle given to (.*): (.*)$/, '✓ $1 को बंडल दिया: $2'], [/^✓ (.*) kg added to bill  (.*)$/, '✓ $1 kg बिल में जोड़ा  $2'],
+  [/^Bundle (BS|Net) (.*)$/, (m, k, rest) => `बंडल ${k} ` + rest.replace(/ − box /g, ' − डिब्बा ').replace(/ − returned /g, ' − वापस ').replace(/ kg used$/, ' kg इस्तेमाल')],
+  [/^🧵 Bundle (BS|Net) (.*)$/, (m, k, rest) => `🧵 बंडल ${k} ` + rest.replace(/ − box /g, ' − डिब्बा ').replace(/ − returned /g, ' − वापस ').replace(/ kg used$/, ' kg इस्तेमाल')],
+  [/^(.*) · (.*) kg\. Use this only if it was entered by mistake\.$/, '$1 · $2 kg। सिर्फ़ गलती से डाली एंट्री के लिए।'],
 ];
 
 // Names typed by the user are never translated.

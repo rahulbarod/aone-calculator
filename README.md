@@ -1,4 +1,4 @@
-# A One Enterprise — Billing & Weight Calculator (v2.3, cloud sync)
+# A One Enterprise — Billing & Weight Calculator (v2.4, cloud sync)
 
 Offline-first PWA for counter billing. Plain HTML/CSS/JS, no build step.
 Products, customers and bills sync live between phones through Firebase (Firestore),
@@ -67,6 +67,14 @@ Phones get the new version the next time the app is opened twice.
 
 Settings → **भाषा / Language** → हिंदी (per phone; also on the sign-in screen). Customer/product names, typed text,
 and the bill itself (screen receipt, print image, WhatsApp text) stay as they are. To change a Hindi word, edit `js/i18n.js`.
+
+## Wire bundles (v2.4)
+
+Home → **🧵 Wire bundles** → **＋ Give bundle**: customer, wire, weight on the scale, **BS** (with box, box weight
+remembered per wire product) or **Net**. When the customer comes back, open the bundle (or tap the banner on their bill):
+enter the returned weight or tap **Used all**. Used wire = given − returned; the box weight is deducted only when the box
+doesn't come back. The line is added to the customer's open bill (or a new one) with the working shown, e.g.
+"Bundle BS 5.30 − box 0.30 = 5.00 kg used". Removing that line from the bill puts the bundle back on the list.
 
 ## Data notes
 

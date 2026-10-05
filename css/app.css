@@ -397,3 +397,16 @@ textarea.input { resize: vertical; }
 html[lang="hi"] body * { letter-spacing: 0 !important; }
 html[lang="hi"] .lbl, html[lang="hi"] .sec-label, html[lang="hi"] .sec-head, html[lang="hi"] .stat span,
 html[lang="hi"] .total-row span, html[lang="hi"] .cc-main small:first-child, html[lang="hi"] .subtotal span { font-size: 15px; }
+
+/* ---------- wire bundles ---------- */
+.bundle-row { border-color: var(--brand-2); background: #f3f8fd; }
+.bundle-row .ti { font-size: 28px; }
+.bundle-row b { font-size: 18px !important; letter-spacing: .03em; }
+.bundle-note { display: flex; align-items: center; gap: 10px; padding: 12px 14px; border-radius: var(--r); background: #fff7e6; border: 2px solid var(--due-line); font-size: 22px; }
+.bundle-note > span:not(.link) { flex: 1; display: flex; flex-direction: column; font-size: 16px; }
+.bundle-note .link { font-size: 15px; white-space: nowrap; }
+.it-note { font-size: 14px; color: var(--brand-2); font-weight: 700; }
+.r-note { font-size: 13px; color: var(--muted); padding-left: 2px; }
+.pick-done { display: flex; align-items: center; justify-content: space-between; min-height: 58px; padding: 0 14px; border: 2px solid var(--brand-2); border-radius: 12px; background: #eef5fc; font-size: 20px; }
+.ptile.sel { border-color: var(--go); background: #ecfdf3; box-shadow: inset 0 0 0 2px var(--go); }
+.due-amt.ok { color: var(--go); }

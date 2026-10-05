@@ -38,7 +38,7 @@ if (EMU) {
   connectFirestoreEmulator(fs, '127.0.0.1', 8080);
 }
 
-const COLLECTIONS = ['products', 'customers', 'bills', 'meta'];
+const COLLECTIONS = ['products', 'customers', 'bills', 'bundles', 'meta'];
 const ref = (col, id) => doc(fs, col, id);
 const clean = obj => JSON.parse(JSON.stringify(obj)); // Firestore rejects `undefined`
 const pairs = fields => Object.entries(fields).flat();
@@ -77,18 +77,24 @@ export const cloud = {
     }
     // Bills: everything still open or unpaid, plus anything touched recently.
     // Older history is fetched on demand so daily reads stay small.
-    const open = new Map();
-    const unpaid = new Map();
-    const recent = new Map();
-    const emit = s => handler('bills', [...new Map([...recent, ...unpaid, ...open]).values()], meta(s));
-    const track = (map, q) => unsubs.push(onSnapshot(q, opts, s => {
-      map.clear();
-      s.docs.forEach(d => map.set(d.id, { id: d.id, ...d.data() }));
-      emit(s);
-    }, onError));
-    track(open, query(collection(fs, 'bills'), where('status', 'in', ['DRAFT', 'ACTIVE'])));
-    track(unpaid, query(collection(fs, 'bills'), where('settled', '==', false)));
-    track(recent, query(collection(fs, 'bills'), where('updatedAt', '>=', recentSinceIso)));
+    // Several queries feed one list; each keeps its own map and they are merged.
+    const merged = (name, count) => {
+      const maps = Array.from({ length: count }, () => new Map());
+      const emit = s => handler(name, [...new Map(maps.flatMap(m => [...m])).values()], meta(s));
+      return (i, q) => unsubs.push(onSnapshot(q, opts, s => {
+        maps[i].clear();
+        s.docs.forEach(d => maps[i].set(d.id, { id: d.id, ...d.data() }));
+        emit(s);
+      }, onError));
+    };
+    const bills = merged('bills', 3);
+    bills(0, query(collection(fs, 'bills'), where('updatedAt', '>=', recentSinceIso)));
+    bills(1, query(collection(fs, 'bills'), where('settled', '==', false)));
+    bills(2, query(collection(fs, 'bills'), where('status', 'in', ['DRAFT', 'ACTIVE'])));
+    // Wire bundles: every bundle still with a customer, plus recently returned ones.
+    const bundles = merged('bundles', 2);
+    bundles(0, query(collection(fs, 'bundles'), where('updatedAt', '>=', recentSinceIso)));
+    bundles(1, query(collection(fs, 'bundles'), where('status', '==', 'OUT')));
     return () => unsubs.forEach(u => u());
   },
 

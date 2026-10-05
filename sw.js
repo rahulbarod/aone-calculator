@@ -1,6 +1,6 @@
 // Offline cache for the app shell and the Firebase SDK. Bump VERSION
 // whenever any file changes so installed phones pick up the new files.
-const VERSION = 'aone-v2.3.0';
+const VERSION = 'aone-v2.4.0';
 const FIREBASE = 'https://www.gstatic.com/firebasejs/12.19.0/';
 const ASSETS = [
   './',
