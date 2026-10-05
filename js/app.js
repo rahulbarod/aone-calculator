@@ -5,7 +5,7 @@ import { scale } from './scale.js';
 import { parseProductSpeech } from './parse.js';
 import { startHindi } from './i18n.js';
 
-const APP_VERSION = '2.6.0';
+const APP_VERSION = '2.7.0';
 
 // ---------------------------------------------------------------- constants
 const UNITS = {
@@ -228,14 +228,21 @@ function recalc(b, touch = true) {
   b.payments = b.payments || [];
   b.paid = b.legacyPaid ? b.total : round2(b.payments.reduce((s, p) => s + p.amount, 0));
   b.balance = round2(b.total - b.paid);
-  b.isSettled = Math.abs(b.balance) < 0.005;
+  // A wire bundle still with the customer means the bill isn't finished.
+  b.wireOut = b.items.some(i => i.pending);
+  b.isSettled = Math.abs(b.balance) < 0.005 && !b.wireOut;
   if (touch) b.updatedAt = now();
 }
+// Bills changed on this phone in the last few seconds: a sync update that is
+// older than our own change must not overwrite it on screen.
+const localWrites = new Map();
 const totalsOf = b => {
+  localWrites.set(b.id, Date.now());
   recalc(b);
   return { subtotal: b.subtotal, total: b.total, updatedAt: b.updatedAt };
 };
 const payStateOf = b => {
+  localWrites.set(b.id, Date.now());
   recalc(b);
   return { paid: b.paid, balance: b.balance, settled: b.isSettled, settledAt: b.isSettled ? (b.settledAt || now()) : null, updatedAt: b.updatedAt };
 };
@@ -279,7 +286,7 @@ const custKeyName = (key, b) => getCustomer(key)?.name || b?.customerName || 'Wa
 const unpaidBills = () => allBills().filter(b => b.status === 'COMPLETED' && !b.isSettled).sort(byTime('completedAt'));
 function duesByCustomer() {
   const map = new Map();
-  for (const b of unpaidBills()) {
+  for (const b of unpaidBills().filter(x => Math.abs(x.balance) >= 0.005)) {
     const k = custKey(b);
     const g = map.get(k) || { key: k, name: custKeyName(k, b), bills: [], balance: 0 };
     g.bills.push(b);
@@ -405,16 +412,22 @@ function saveCustomer(f, existing = null) {
   cloud.put('customers', c);
   return c;
 }
-function adjustStock(bill) {
-  for (const it of bill.items) {
-    const p = getProduct(it.productId);
-    if (p && typeof p.stock === 'number' && p.unit === it.unit) {
-      const delta = it.rate < 0 ? it.quantity : -it.quantity; // scrap comes in, sales go out
-      p.stock = round3(p.stock + delta);
-      cloud.addStock(p.id, delta, now());
-    }
+// sign 1 = sold (stock goes out, scrap comes in); -1 = undo that.
+function stockMove(it, sign = 1) {
+  const p = getProduct(it.productId);
+  if (p && typeof p.stock === 'number' && p.unit === it.unit && it.quantity) {
+    const delta = sign * (it.rate < 0 ? it.quantity : -it.quantity);
+    p.stock = round3(p.stock + delta);
+    cloud.addStock(p.id, delta, now());
   }
 }
+function adjustStock(bill) {
+  bill.items.forEach(it => stockMove(it, 1));
+}
+const isOpenBill = b => b.status === 'ACTIVE' || b.status === 'DRAFT';
+const billHref = b => (isOpenBill(b) ? `/bill/${b.id}` : `/receipt/${b.id}`);
+// Completed bills where a wire bundle hasn't come back yet.
+const awaitingBills = () => S.bills.filter(b => b.status === 'COMPLETED' && b.wireOut).sort(byTime('completedAt'));
 
 // ---------------------------------------------------------------- live data
 let unsubscribe = null;
@@ -423,7 +436,12 @@ function onData(name, rows, meta) {
   if (name === 'products') S.products = rows;
   else if (name === 'customers') S.customers = rows;
   else if (name === 'bills') {
-    S.bills = rows.map(billFromDoc);
+    const prev = new Map(S.bills.map(b => [b.id, b]));
+    S.bills = rows.map(billFromDoc).map(b => {
+      const mine = prev.get(b.id);
+      const recent = Date.now() - (localWrites.get(b.id) || 0) < 10e3;
+      return recent && mine && (mine.updatedAt || '') > (b.updatedAt || '') ? mine : b;
+    });
     for (const [id, { bill, at }] of justCreated) {
       if (S.bills.some(b => b.id === id) || Date.now() - at > 15e3) justCreated.delete(id);
       else S.bills.push(bill);
@@ -443,6 +461,10 @@ function onData(name, rows, meta) {
     const { id, ...shop } = rows.find(r => r.id === 'shop') || {};
     S.shop = { ...DEFAULT_SHOP, ...shop };
     const { id: _, ...counters } = rows.find(r => r.id === 'counters') || {};
+    if (S.shop.countersResetAt && S.shop.countersResetAt > (local.get('countersResetAt') || '')) {
+      Object.keys(localStorage).filter(k => k.startsWith('aone.counter.')).forEach(k => localStorage.removeItem(k));
+      local.set('countersResetAt', S.shop.countersResetAt);
+    }
     S.counters = counters;
   }
   const first = !S.loaded[name];
@@ -592,7 +614,7 @@ const micBtn = target => `<button type="button" class="mic" data-act="mic" data-
 function billCard(b) {
   return `<button class="bill-card" data-act="openBill" data-id="${b.id}">
     <span class="dot ${b.items.length ? 'on' : ''}"></span>
-    <span class="bc-name"><b>${esc(billName(b))}</b><small>${plural(b.items.length, 'item')} · ${billLabel(b)} · ${fmtTime(b.createdAt)}</small></span>
+    <span class="bc-name"><b>${esc(billName(b))}</b><small>${b.status === 'COMPLETED' && b.wireOut ? `⏳ wire out · ${billLabel(b)}${b.balance >= 0.005 ? ` · due ${money(b.balance)}` : ''}` : `${plural(b.items.length, 'item')} · ${billLabel(b)} · ${fmtTime(b.createdAt)}`}</small></span>
     <span class="bc-total ${b.total < 0 ? 'neg-text' : ''}">${money(b.total)}</span>
   </button>`;
 }
@@ -652,6 +674,7 @@ function viewHome() {
     <a class="sec-head" href="#/bills"><span>ACTIVE BILLS${act.length ? `<i class="count">${act.length}</i>` : ''}</span><span class="more">All ›</span></a>
     ${act.length ? `<div class="list">${act.slice(0, 6).map(billCard).join('')}</div>` : '<p class="empty">No open bills right now</p>'}
     ${act.length > 6 ? `<a class="btn-text" href="#/bills">+${act.length - 6} more bills</a>` : ''}
+    ${awaitingBills().length ? `<div class="sec-label">⏳ WAITING FOR WIRE RETURN</div><div class="list">${awaitingBills().map(billCard).join('')}</div>` : ''}
     <a class="row bundle-row" href="#/bundles"><span class="ti">🧵</span><span class="row-main"><b>WIRE BUNDLES</b><small>${openBundles().length ? `${plural(openBundles().length, 'bundle')} out with customers` : 'Give a bundle · bill on return'}</small></span><span class="chev">›</span></a>
     <nav class="grid2">
       <a class="tile" href="#/reports"><span class="ti">📊</span>REPORTS</a>
@@ -825,7 +848,7 @@ function receiptHtml(b) {
         <div class="r-items">${sec.scrap.map(line).join('')}</div>
         <div class="r-subtotal neg-text"><span>Scrap total</span><b>${money(sec.scrapTotal)}</b></div>`;
     })()}
-    <div class="r-total"><span>${finalLabel(b)}</span>${b.status === 'CANCELLED' ? '<i class="stamp">CANCELLED</i>' : b.status !== 'COMPLETED' ? '' : b.isSettled ? '<i class="stamp ok">PAID</i>' : '<i class="stamp due">DUE</i>'}<b>${money(Math.abs(b.total))}</b></div>
+    <div class="r-total"><span>${finalLabel(b)}</span>${b.status === 'CANCELLED' ? '<i class="stamp">CANCELLED</i>' : b.status !== 'COMPLETED' ? '' : b.wireOut ? '<i class="stamp due">WIRE OUT</i>' : b.isSettled ? '<i class="stamp ok">PAID</i>' : '<i class="stamp due">DUE</i>'}<b>${money(Math.abs(b.total))}</b></div>
     ${b.status === 'COMPLETED' && (b.payments.length > 1 || !b.isSettled) ? `<div class="r-pay">
       ${b.payments.map(p => `<div><span>${p.amount < 0 ? 'Paid out' : 'Received'} · ${fmtDate(p.at)}${p.method ? ' · ' + esc(p.method) : ''}${p.itemIds ? ` · for ${esc(itemNames(b, p.itemIds))}` : ''}</span><b>${money(Math.abs(p.amount))}</b></div>`).join('')}
       ${b.isSettled ? '' : `<div class="r-bal"><span>BALANCE ${b.balance < 0 ? 'TO PAY CUSTOMER' : 'DUE'}</span><b>${money(Math.abs(b.balance))}</b></div>`}
@@ -838,7 +861,8 @@ function paymentsPanel(b) {
   return `<section class="card"><h2>Payments</h2>
     ${b.payments.length ? b.payments.map(p => `<div class="pay-row"><span><b>${money(Math.abs(p.amount))}</b> ${p.amount < 0 ? 'paid out' : 'received'}<small>${fmtDate(p.at)}, ${fmtTime(p.at)}${p.method ? ' · ' + esc(p.method) : ''}</small>${p.itemIds ? `<small class="pay-for">for: ${esc(itemNames(b, p.itemIds))}</small>` : ''}</span>
       <button class="x" data-act="deletePayment" data-bill="${b.id}" data-id="${p.id}" aria-label="Delete payment">✕</button></div>`).join('') : '<p class="hint">No payment yet.</p>'}
-    ${b.isSettled ? '<p class="settled-note">✓ Fully settled</p>' : `<p class="due-note">Balance ${b.balance < 0 ? 'to pay customer' : 'due'}: <b>${money(Math.abs(b.balance))}</b></p>
+    ${b.wireOut && Math.abs(b.balance) < 0.005 ? '<p class="due-note">⏳ Paid so far — wire used will be added to this bill when the bundle comes back.</p>'
+      : b.isSettled ? '<p class="settled-note">✓ Fully settled</p>' : `<p class="due-note">Balance ${b.balance < 0 ? 'to pay customer' : 'due'}: <b>${money(Math.abs(b.balance))}</b></p>
       <button class="btn-big go" data-act="payBill" data-id="${b.id}">${b.balance < 0 ? 'RECORD PAYOUT' : '₹ RECEIVE PAYMENT'}</button>`}
   </section>`;
 }
@@ -868,6 +892,7 @@ function receiptText(b) {
 function viewReceipt(bill, back) {
   return `${topbar(`Bill ${billLabel(bill)}`, back, `<span class="status">${bill.status}</span>`, back !== '/')}
   <main class="page">
+    ${bill.status === 'COMPLETED' ? bill.items.filter(i => i.pending && getBundle(i.bundleId)).map(i => `<a class="bundle-note" href="#/bundle/${i.bundleId}/${bill.id}">⏳ <span><b>Waiting for wire return</b><small>${esc(i.productName)} · ${esc(bundleGiven(getBundle(i.bundleId)))}</small></span><span class="link">Enter return</span></a>`).join('') : ''}
     ${receiptHtml(bill)}
     ${paymentsPanel(bill)}
     <div class="btn-row">
@@ -876,6 +901,7 @@ function viewReceipt(bill, back) {
     </div>
     <button class="btn-big go" data-act="newBill">＋ NEW BILL</button>
     <a class="btn-mid" href="#/">HOME</a>
+    <button class="btn-text danger" data-act="deleteBillDoc" data-id="${bill.id}">🗑 Delete this bill</button>
   </main>`;
 }
 
@@ -909,7 +935,7 @@ function historyResults(q) {
     return `<div class="day-head"><span>${g.d}</span><span>${plural(done.length, 'bill')} · ${money(total)}</span></div>
     <div class="list">${g.bills.map(b => `<button class="hrow ${b.status === 'CANCELLED' ? 'cancelled' : ''}" data-act="openReceipt" data-id="${b.id}">
       <span class="h-time">${fmtTime(when(b))}</span>
-      <span class="h-main"><b>${esc(billName(b))}</b><small>${plural(b.items.length, 'item')} · ${billLabel(b)}${b.status === 'CANCELLED' ? ' · <span class="tag cancel">CANCELLED</span>' : !b.isSettled ? ` · <span class="tag due">DUE ${money(Math.abs(b.balance))}</span>` : ''}</small></span>
+      <span class="h-main"><b>${esc(billName(b))}</b><small>${plural(b.items.length, 'item')} · ${billLabel(b)}${b.status === 'CANCELLED' ? ' · <span class="tag cancel">CANCELLED</span>' : `${b.wireOut ? ' · <span class="tag bundle">WIRE OUT</span>' : ''}${Math.abs(b.balance) >= 0.005 ? ` · <span class="tag due">DUE ${money(Math.abs(b.balance))}</span>` : ''}`}</small></span>
       <span class="h-amt ${b.total < 0 ? 'neg-text' : ''}">${money(b.total)}</span></button>`).join('')}</div>`;
   }).join('');
 }
@@ -1289,7 +1315,7 @@ function viewStatement(key) {
   const net = round2(bills.reduce((s, b) => s + b.total, 0));
   const billRow = b => `<button class="hrow" data-act="openReceipt" data-id="${b.id}">
     <span class="h-time">${fmtDate(b.completedAt).slice(0, 6)}</span>
-    <span class="h-main"><b>${billLabel(b)}</b><small>${plural(b.items.length, 'item')}${b.isSettled ? ' · paid' : ` · <span class="tag due">DUE ${money(Math.abs(b.balance))}</span>`}</small></span>
+    <span class="h-main"><b>${billLabel(b)}</b><small>${plural(b.items.length, 'item')}${b.isSettled ? ' · paid' : `${b.wireOut ? ' · <span class="tag bundle">WIRE OUT</span>' : ''}${Math.abs(b.balance) >= 0.005 ? ` · <span class="tag due">DUE ${money(Math.abs(b.balance))}</span>` : ''}`}</small></span>
     <span class="h-amt ${b.total < 0 ? 'neg-text' : ''}">${money(b.total)}</span></button>`;
   return `${topbar(esc(name), c ? '/customers' : '/dues', '<button class="tb-act" data-act="shareStatement" data-key="' + esc(key) + '">📤</button>')}
   <main class="page">
@@ -1420,8 +1446,8 @@ function viewBundleReturn(id, billId) {
   if (!bd) return S.loaded.bundles ? go('/bundles', true) : '<div class="boot">Loading…</div>';
   const p = getProduct(bd.productId);
   const bill = bd.billId ? getBill(bd.billId) : null;
-  const billOpen = bill && ['ACTIVE', 'DRAFT'].includes(bill.status);
-  const billLink = bill ? `<a class="btn-mid" href="#/${billOpen ? 'bill' : 'receipt'}/${bill.id}">Open bill ${billLabel(bill)}</a>` : '';
+  const billOpen = bill && bill.status !== 'CANCELLED';
+  const billLink = bill ? `<a class="btn-mid" href="#${billHref(bill)}">Open bill ${billLabel(bill)}</a>` : '';
   const head = `<section class="card">
       <p class="due-big"><b>${esc(bd.customerName || 'Walk-in customer')}</b></p>
       <p>${esc(bd.productName)} · <b>${kg(bd.outWeight)} kg</b> ${bd.packing === 'BS' ? `BS (box ${kg(bd.boxWeight || 0)} kg)` : 'Net'}</p>
@@ -1611,7 +1637,8 @@ function settlementOps(key) {
     }
     ops.push({ t: 'row', l: '   Bill total', r: money(b.total), size: 22, bold: true });
     b.payments.forEach(p => ops.push({ t: 'text', s: `   ${payLine(b, p)}`, size: 19 }));
-    if (!b.isSettled) ops.push({ t: 'row', l: '   Due on this bill', r: money(b.balance), size: 22, bold: true, cls: 'due' });
+    if (Math.abs(b.balance) >= 0.005) ops.push({ t: 'row', l: '   Due on this bill', r: money(b.balance), size: 22, bold: true, cls: 'due' });
+    if (b.wireOut) ops.push({ t: 'text', s: '   Wire bundle not returned yet — will be added to this bill', size: 19 });
     ops.push({ t: 'rule' });
   }
   const out = openBundles().filter(bd => custKey(bd) === key);
@@ -1746,6 +1773,7 @@ function viewSettings() {
       <p>${counts}</p>
       <p class="hint" id="storageInfo"></p>
       <button class="btn-mid" data-act="loadSamples">Add sample products</button>
+      <button class="btn-mid danger" data-act="deleteAllBills">🗑 DELETE ALL BILLS (keep products &amp; customers)</button>
       <button class="btn-mid danger" data-act="clearAll">🗑 CLEAR ALL DATA</button>
     </section>
     <p class="ver">A One Billing v${APP_VERSION}${cloud.emulator ? ' · EMULATOR' : ''}</p>
@@ -1974,7 +2002,7 @@ const A = {
   },
   openBill(el) {
     const b = getBill(el.dataset.id);
-    if (b) go(b.customerChosen ? `/bill/${b.id}` : `/bill/${b.id}/customer`);
+    if (b) go(!isOpenBill(b) ? `/receipt/${b.id}` : b.customerChosen ? `/bill/${b.id}` : `/bill/${b.id}/customer`);
   },
   openReceipt(el) { go(`/receipt/${el.dataset.id}`); },
   changeCustomer() { go(`/bill/${R.b}/customer`); },
@@ -2088,19 +2116,12 @@ const A = {
     if (bd.status !== 'OUT') return toast('This bundle was already returned', 'err');
     if (f.used < 0 || (f.used > 0 && !(f.rate > 0))) return toast('Check the weight and rate', 'err');
     const at = now();
-    // Fill in the bundle's own line if its bill is still open; otherwise bill
-    // it on the customer's open (or a new) bill.
+    // Fill in the bundle's own line on its bill — open or already completed.
+    // Only if that bill was cancelled/deleted does it go on the customer's open bill.
     let bill = getBill(bd.billId);
     const own = bill?.items.find(i => i.id === bd.itemId);
-    const sameBill = !!own && ['ACTIVE', 'DRAFT'].includes(bill.status);
-    if (!sameBill) {
-      if (own) {
-        const moved = { ...own, pending: false, note: `${bundleGiven(bd)} · Returned later — billed separately` };
-        Object.assign(own, moved);
-        cloud.setBillEntry(bill.id, 'items', moved, {});
-      }
-      bill = openBillFor(bd);
-    }
+    const sameBill = !!own && bill.status !== 'CANCELLED';
+    if (!sameBill) bill = openBillFor(bd);
     const p = getProduct(bd.productId);
     const item = {
       ...(sameBill ? own : {}), id: sameBill ? own.id : uid(), billId: bill.id, productId: bd.productId, productName: bd.productName,
@@ -2108,6 +2129,10 @@ const A = {
       amount: f.amount, isNegative: false, pending: false, note: f.note, bundleId: bd.id, addedAt: sameBill ? own.addedAt : at, addedBy: S.user.email,
     };
     putBillItem(bill, item, bill.status === 'DRAFT' ? { status: 'ACTIVE' } : {});
+    if (bill.status === 'COMPLETED') {
+      stockMove(item, 1);
+      cloud.update('bills', bill.id, payStateOf(bill));
+    }
     const closed = {
       status: 'RETURNED', returnWeight: f.back, returnedWithBox: bnReturn.withBox, usedKg: f.used, rate: f.rate, amount: f.amount,
       returnNote: f.note, returnAt: at, returnBy: S.user.email, billId: bill.id, itemId: item.id, updatedAt: at,
@@ -2116,14 +2141,16 @@ const A = {
     cloud.update('bundles', bd.id, closed);
     bnReturn = null;
     toast(f.used ? `✓ ${kg(f.used)} kg added to bill  ${money(f.amount)}` : 'Bundle closed — nothing used');
-    go(`/bill/${bill.id}`, true);
+    go(billHref(bill), true);
   },
   brUndo() {
     const bd = getBundle(R.b);
     const bill = getBill(bd.billId);
     const it = bill?.items.find(i => i.id === bd.itemId);
-    if (!it || !['ACTIVE', 'DRAFT'].includes(bill.status)) return toast('This bill was already closed on another phone', 'err');
+    if (!it || bill.status === 'CANCELLED') return toast('This bill was cancelled', 'err');
+    if (bill.status === 'COMPLETED') stockMove(it, -1);
     putBillItem(bill, { ...it, quantity: 0, amount: 0, pending: true, note: `${bundleGiven(bd)} · ${PENDING}` });
+    if (bill.status === 'COMPLETED') cloud.update('bills', bill.id, payStateOf(bill));
     const reset = { status: 'OUT', returnAt: null, returnNote: null, usedKg: null, amount: null, updatedAt: now() };
     Object.assign(bd, reset);
     cloud.update('bundles', bd.id, reset);
@@ -2293,7 +2320,7 @@ const A = {
     const amt = out ? `Pay to customer <b>${money(Math.abs(bill.total))}</b>` : `Total <b>${money(bill.total)}</b>`;
     const choice = await confirmBox({
       title: `Complete bill for ${esc(billName(bill))}?`,
-      body: `${plural(bill.items.length, 'item')} · ${amt}${bill.items.some(i => i.pending) ? `<br><span class="warn-text">⚠ ${plural(bill.items.filter(i => i.pending).length, 'wire bundle')} not returned yet — it will be billed on a new bill when returned.</span>` : ''}`,
+      body: `${plural(bill.items.length, 'item')} · ${amt}${bill.items.some(i => i.pending) ? `<br><span class="warn-text">⏳ ${plural(bill.items.filter(i => i.pending).length, 'wire bundle')} not returned yet — the bill stays open and the wire used is added to it when returned.</span>` : ''}`,
       ok: out ? '✓ PAID OUT' : '✓ PAID', alt: out ? 'PAY LATER' : 'PAY LATER (DUE)', cancel: 'BACK',
       more: out ? [] : [['part', 'PART PAID — choose items']],
     });
@@ -2302,7 +2329,8 @@ const A = {
     if (!bill || bill.status !== 'ACTIVE' && bill.status !== 'DRAFT') return toast('This bill was already closed on another phone', 'err');
     const at = now();
     updateBill(bill, { status: 'COMPLETED', completedAt: at, completedBy: S.user.email });
-    if (choice === true && bill.total) addPayment(bill, bill.total, 'Cash');
+    const charged = bill.items.filter(i => !i.pending && i.amount).map(i => i.id);
+    if (choice === true && bill.total) addPayment(bill, bill.total, 'Cash', bill.wireOut ? charged : null);
     else cloud.update('bills', bill.id, payStateOf(bill));
     adjustStock(bill);
     if (bill.customerId && getCustomer(bill.customerId)) cloud.update('customers', bill.customerId, { lastBilledAt: at });
@@ -2321,6 +2349,37 @@ const A = {
     }
     toast('Bill cancelled');
     go('/', true);
+  },
+  async deleteBillDoc(el) {
+    const bill = getBill(el.dataset.id);
+    const linked = S.bundles.filter(bd => bd.billId === bill.id);
+    if (!await confirmBox({
+      title: `Delete bill ${billLabel(bill)}?`,
+      body: `${esc(billName(bill))} · ${money(bill.total)}. It disappears from history, reports and dues on every phone${linked.length ? `, together with its ${plural(linked.length, 'wire bundle')}` : ''}. This can't be undone.`,
+      ok: 'DELETE', danger: true,
+    })) return;
+    if (bill.status === 'COMPLETED') bill.items.forEach(it => stockMove(it, -1));
+    linked.forEach(bd => cloud.remove('bundles', bd.id));
+    S.bundles = S.bundles.filter(bd => bd.billId !== bill.id);
+    S.olderBills = S.olderBills.filter(b => b.id !== bill.id);
+    deleteBill(bill);
+    toast('Bill deleted');
+    goBack('/history');
+  },
+  async deleteAllBills() {
+    if (!navigator.onLine) return toast('Connect to the internet first', 'err');
+    if (!await confirmBox({ title: 'Delete ALL bills?', body: 'All bills, payments, dues and wire bundles are erased <b>on every phone</b>. Products, customers and shop settings are kept. Bill numbers start again from 1.', ok: 'DELETE BILLS', danger: true, typeToConfirm: 'DELETE' })) return;
+    try {
+      toast('Deleting…');
+      await cloud.deleteAll(['bills', 'bundles']);
+      cloud.remove('meta', 'counters');
+      cloud.setMeta('shop', { countersResetAt: now() });
+      S.olderBills = [];
+      toast('✓ All bills deleted');
+      go('/', true);
+    } catch (e) {
+      toast('Could not delete: ' + e.message, 'err');
+    }
   },
   shareBill(el) {
     const bill = getBill(el.dataset.id);

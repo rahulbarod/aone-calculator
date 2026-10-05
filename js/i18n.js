@@ -153,12 +153,21 @@ const PHRASES = {
   'PART PAID — choose items': 'कुछ पैसे मिले — आइटम चुनें', 'WHICH ITEMS ARE PAID NOW? (optional)': 'किन आइटम के पैसे मिले? (ज़रूरी नहीं)',
   'Ticked items show as PAID on the bill; the rest stay DUE.': 'टिक किए आइटम बिल पर "पैसे मिले" दिखेंगे; बाकी बकाया रहेंगे।',
   '🧾 SETTLEMENT BILL': '🧾 हिसाब का बिल', 'Settlement': 'हिसाब', 'Since oldest due': 'सबसे पुराने बकाया से', 'Open': 'खोलें', 'Loading older bills…': 'पुराने बिल लोड हो रहे हैं…',
+  '⏳ WAITING FOR WIRE RETURN': '⏳ वायर लौटने का इंतज़ार', 'WIRE OUT': 'वायर बाहर', 'Waiting for wire return': 'वायर लौटने का इंतज़ार', 'Enter return': 'वापसी डालें',
+  '⏳ Paid so far — wire used will be added to this bill when the bundle comes back.': '⏳ अभी तक का भुगतान हो गया — बंडल लौटने पर इस्तेमाल हुआ वायर इसी बिल में जुड़ेगा।',
+  '🗑 Delete this bill': '🗑 यह बिल हटाएँ', 'Bill deleted': 'बिल हटाया', '🗑 DELETE ALL BILLS (keep products & customers)': '🗑 सभी बिल हटाएँ (सामान और ग्राहक रहेंगे)',
+  'Delete ALL bills?': 'सभी बिल हटाएँ?', 'DELETE BILLS': 'बिल हटाएँ', 'Deleting…': 'हटा रहे हैं…', '✓ All bills deleted': '✓ सभी बिल हट गए', 'This bill was cancelled': 'यह बिल रद्द हो चुका है',
+  'All bills, payments, dues and wire bundles are erased': 'सभी बिल, भुगतान, बकाया और वायर बंडल मिट जाएँगे',
+  'Products, customers and shop settings are kept. Bill numbers start again from 1.': 'सामान, ग्राहक और दुकान की सेटिंग रहेंगी। बिल नंबर फिर 1 से शुरू होंगे।',
   'English (India)': 'अंग्रेज़ी', 'Hindi': 'हिंदी', 'Marathi': 'मराठी', 'Gujarati': 'गुजराती', 'Punjabi': 'पंजाबी', 'Bengali': 'बांग्ला', 'Tamil': 'तमिल', 'Telugu': 'तेलुगु', 'Kannada': 'कन्नड़',
   'Connect to the internet first': 'पहले इंटरनेट चालू करें', 'Sample products already present': 'नमूना सामान पहले से है', 'All data cleared': 'सारा डेटा मिट गया',
 };
 
 // Texts that contain numbers, amounts or names.
 const PATTERNS = [
+  [/^Delete bill (#\S+)\?$/, 'बिल $1 हटाएँ?'], [/^⏳ wire out · /, '⏳ वायर बाहर · '], [/ · due (₹.*)$/, ' · बकाया $1'],
+  [/^(.*)\. It disappears from history, reports and dues on every phone(.*)\. This can't be undone\.$/, (m, a2, b2) => `${a2}। यह हर फ़ोन पर पुराने बिल, रिपोर्ट और बकाया से हट जाएगा${b2 ? ' (वायर बंडल भी)' : ''}। वापस नहीं आएगा।`],
+  [/^⏳ (\d+) wire bundles? not returned yet — the bill stays open.*$/, '⏳ $1 वायर बंडल अभी वापस नहीं आया — बिल खुला रहेगा, लौटने पर इस्तेमाल हुआ वायर इसी बिल में जुड़ेगा।'],
   [/^₹ RECEIVE PAYMENT \((.*)\)$/, '₹ पैसे मिले ($1)'], [/^Open bill (#\S+) not completed$/, 'चालू बिल $1 अभी पूरा नहीं'],
   [/ — complete it to include it here$/, ' — इसे यहाँ जोड़ने के लिए बिल पूरा करें'], [/^for: /, 'इनके लिए: '],
   [/ · box ([\d.,]+)$/, ' · डिब्बा $1'],

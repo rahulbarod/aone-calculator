@@ -144,9 +144,9 @@ export const cloud = {
     for (const col of COLLECTIONS) for (const row of data[col] || []) ops.push(b => b.set(ref(col, row.id), clean(row)));
     await commitInChunks(ops);
   },
-  async deleteAll() {
+  async deleteAll(cols = COLLECTIONS) {
     const ops = [];
-    for (const col of COLLECTIONS) (await getDocs(collection(fs, col))).docs.forEach(d => ops.push(b => b.delete(d.ref)));
+    for (const col of cols) (await getDocs(collection(fs, col))).docs.forEach(d => ops.push(b => b.delete(d.ref)));
     await commitInChunks(ops);
   },
 };

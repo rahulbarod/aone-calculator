@@ -1,4 +1,4 @@
-# A One Enterprise — Billing & Weight Calculator (v2.6, cloud sync)
+# A One Enterprise — Billing & Weight Calculator (v2.7, cloud sync)
 
 Offline-first PWA for counter billing. Plain HTML/CSS/JS, no build step.
 Products, customers and bills sync live between phones through Firebase (Firestore),
@@ -77,8 +77,9 @@ Bundles live on the bill, next to the other items:
 - When the customer comes back, tap that line → enter the returned weight or **Used all**. The same line becomes
   "Given 5.30 kg BS (box 0.30) · Returned 2.15 kg with box · Net wire used 3.15 kg" and is charged on the net wire used.
   Box weight is deducted only when the box doesn't come back. "↩ Re-enter returned weight" fixes a wrong entry.
-- Completing a bill while a bundle is still out warns first; when that bundle returns later it is billed on a new bill
-  and the old line says "Returned later — billed separately".
+- Completing a bill while a bundle is still out: the other items can be paid, but the bill stays **WIRE OUT** (not
+  settled) and is listed on Home under "⏳ Waiting for wire return". When the wire comes back — from the bill or from the
+  Wire bundles section — the wire used is added to **the same bill** and shows as due.
 
 ## Part payments & settlement bill (v2.6)
 
@@ -89,6 +90,12 @@ Bundles live on the bill, next to the other items:
   this week / this month / last month / custom) listing every visit with item times, wire bundles given/returned with
   times and net wire used, every payment and what it covered, dues per bill, wire still out, and a summary
   (purchases, scrap, total billed, paid, balance due). Share / Print, and **Receive payment** settles the oldest dues first.
+
+## Deleting bills (v2.7)
+
+- Any finished bill: open it → **🗑 Delete this bill** (also removes its wire bundles and puts stock back).
+- Settings → **🗑 DELETE ALL BILLS (keep products & customers)**, type DELETE: clears bills, payments, dues and wire
+  bundles on every phone; bill numbers restart from 1. (Open bills can also be removed with CANCEL.)
 
 ## Back button
 
