@@ -410,3 +410,36 @@ html[lang="hi"] .total-row span, html[lang="hi"] .cc-main small:first-child, htm
 .pick-done { display: flex; align-items: center; justify-content: space-between; min-height: 58px; padding: 0 14px; border: 2px solid var(--brand-2); border-radius: 12px; background: #eef5fc; font-size: 20px; }
 .ptile.sel { border-color: var(--go); background: #ecfdf3; box-shadow: inset 0 0 0 2px var(--go); }
 .due-amt.ok { color: var(--go); }
+
+/* bundles inside the bill + smart back button */
+button.tb-back { color: #fff; }
+.btn-mid.bundle-btn { border: 2px dashed var(--due-line); background: #fff7e6; color: var(--due); }
+.item.pending { background: #fffbeb; box-shadow: inset 6px 0 0 #f59e0b; }
+.item.pending .it-amt { font-size: 26px; }
+.tag.bundle { background: #f59e0b; color: #1f1300; margin-left: 0; }
+.it-note > span { display: block; }
+.calc .calc-line { display: block; font-size: 16px; }
+.warn-text { color: var(--due); font-weight: 800; }
+
+/* item-level payments + settlement document */
+.tag.paid { background: var(--go); color: #fff; }
+.btn-mid.part { border-color: var(--brand-2); color: var(--brand); background: #eef5fc; }
+.pay-items { display: flex; flex-direction: column; border: 2px solid var(--line); border-radius: 12px; padding: 4px 10px; }
+.pay-items .check { justify-content: space-between; border-bottom: 1px solid var(--line); }
+.pay-items .check:last-child { border-bottom: 0; }
+.pay-items .check span { flex: 1; }
+.pay-for { color: var(--brand-2) !important; font-weight: 700; }
+.settle-btn { margin-top: 4px; }
+.receipt.doc { font-size: 15px; }
+.doc .d-text { white-space: pre-wrap; }
+.doc .d-text.center { text-align: center; }
+.doc .d-row { display: flex; justify-content: space-between; gap: 10px; }
+.doc .d-row span:last-child { white-space: nowrap; font-variant-numeric: tabular-nums; }
+.doc .sm { font-size: 13px; color: #475569; }
+.doc .lg { font-size: 17px; }
+.doc .xl { font-size: 22px; }
+.doc .b { font-weight: 800; }
+.doc .due { color: var(--due); }
+.doc hr { border: 0; border-top: 2px dashed var(--line); margin: 8px 0; }
+.doc hr.solid { border-top: 2px solid var(--ink); }
+.doc .d-gap { height: 8px; }

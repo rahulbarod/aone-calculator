@@ -146,12 +146,27 @@ const PHRASES = {
   'Check the weight and rate': 'वज़न और रेट जाँचें', 'Item removed — bundle is back in the list': 'आइटम हटाया — बंडल फिर से सूची में है',
   'Add wire products (unit KG) under Products first.': 'पहले "सामान" में वायर (यूनिट KG) जोड़ें।', 'BOX / PACKING WEIGHT (kg) — for wire bundles': 'डिब्बे/पैकिंग का वज़न (kg) — वायर बंडल के लिए',
   'Walk-in customer': 'राह चलता ग्राहक',
+  'BUNDLE': 'बंडल', 'Tap when wire comes back': 'वायर लौटने पर यहाँ दबाएँ', '🧵 GIVE WIRE BUNDLE (BS / Net)': '🧵 वायर बंडल दें (BS / Net)',
+  'Give wire bundle': 'वायर बंडल दें', 'Wire bundle given': 'वायर बंडल दिया', 'Awaiting return': 'वापसी बाकी', 'Not returned': 'वापस नहीं आया',
+  'Returned later — billed separately': 'बाद में लौटा — अलग बिल में', '↩ Re-enter returned weight': '↩ वापसी का वज़न फिर से डालें',
+  'The bundle is added to this customer\'s open bill as “awaiting return”, so other items can go on the same bill.': 'बंडल ग्राहक के चालू बिल में “वापसी बाकी” के रूप में जुड़ेगा, बाकी सामान भी उसी बिल में जोड़ सकते हैं।',
+  'PART PAID — choose items': 'कुछ पैसे मिले — आइटम चुनें', 'WHICH ITEMS ARE PAID NOW? (optional)': 'किन आइटम के पैसे मिले? (ज़रूरी नहीं)',
+  'Ticked items show as PAID on the bill; the rest stay DUE.': 'टिक किए आइटम बिल पर "पैसे मिले" दिखेंगे; बाकी बकाया रहेंगे।',
+  '🧾 SETTLEMENT BILL': '🧾 हिसाब का बिल', 'Settlement': 'हिसाब', 'Since oldest due': 'सबसे पुराने बकाया से', 'Open': 'खोलें', 'Loading older bills…': 'पुराने बिल लोड हो रहे हैं…',
   'English (India)': 'अंग्रेज़ी', 'Hindi': 'हिंदी', 'Marathi': 'मराठी', 'Gujarati': 'गुजराती', 'Punjabi': 'पंजाबी', 'Bengali': 'बांग्ला', 'Tamil': 'तमिल', 'Telugu': 'तेलुगु', 'Kannada': 'कन्नड़',
   'Connect to the internet first': 'पहले इंटरनेट चालू करें', 'Sample products already present': 'नमूना सामान पहले से है', 'All data cleared': 'सारा डेटा मिट गया',
 };
 
 // Texts that contain numbers, amounts or names.
 const PATTERNS = [
+  [/^₹ RECEIVE PAYMENT \((.*)\)$/, '₹ पैसे मिले ($1)'], [/^Open bill (#\S+) not completed$/, 'चालू बिल $1 अभी पूरा नहीं'],
+  [/ — complete it to include it here$/, ' — इसे यहाँ जोड़ने के लिए बिल पूरा करें'], [/^for: /, 'इनके लिए: '],
+  [/ · box ([\d.,]+)$/, ' · डिब्बा $1'],
+  [/^Given (.*) kg BS \(box (.*)\)$/, 'दिया: $1 kg BS (डिब्बा $2)'], [/^Given (.*) kg Net$/, 'दिया: $1 kg Net'],
+  [/^Returned (.*) kg with box$/, 'वापस: $1 kg डिब्बे के साथ'], [/^Returned (.*) kg without box$/, 'वापस: $1 kg बिना डिब्बे'],
+  [/^Returned ([\d.,]+) kg$/, 'वापस: $1 kg'], [/^Net wire used (.*) kg$/, 'असल इस्तेमाल वायर: $1 kg'],
+  [/^✓ Bundle given: (.*)$/, '✓ बंडल दिया: $1'], [/^Open bill (#\S+)$/, 'बिल $1 खोलें'], [/ · goes on this bill, billed when returned$/, ' · इसी बिल में, वापसी पर बिल'],
+  [/^⚠ (\d+) wire bundles? not returned yet.*$/, '⚠ $1 वायर बंडल अभी वापस नहीं आया — लौटने पर नए बिल में जुड़ेगा।'],
   [/\b(\d+) unpaid bills?\b/g, '$1 बकाया बिल'], [/\b(\d+) recent bills?\b/g, '$1 हाल के बिल'], [/\b(\d+) older bills?\b/g, '$1 पुराने बिल'],
   [/\b(\d+) items?\b/g, '$1 आइटम'], [/\b(\d+) bills?\b/g, '$1 बिल'], [/\b(\d+) customers?\b/g, '$1 ग्राहक'], [/\b(\d+) products?\b/g, '$1 सामान'],
   [/^(.+) completed$/, '$1 पूरे हुए'], [/ · avg /g, ' · औसत '], [/ · oldest (\d+) days$/, ' · सबसे पुराना $1 दिन'], [/ · oldest /, ' · सबसे पुराना '],

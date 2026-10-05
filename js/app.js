@@ -5,7 +5,7 @@ import { scale } from './scale.js';
 import { parseProductSpeech } from './parse.js';
 import { startHindi } from './i18n.js';
 
-const APP_VERSION = '2.4.0';
+const APP_VERSION = '2.6.0';
 
 // ---------------------------------------------------------------- constants
 const UNITS = {
@@ -163,8 +163,10 @@ const allBills = () => [...S.bills, ...S.olderBills.filter(o => !S.bills.some(b 
 const getBill = id => allBills().find(b => b.id === id);
 const getProduct = id => S.products.find(p => p.id === id);
 const getCustomer = id => S.customers.find(c => c.id === id);
+// Bills opened with "Add to bill" but never given a customer or item are hidden.
+const isEmptyDraft = b => b.status === 'DRAFT' && !b.customerChosen && !b.items.length;
 const activeBills = () => S.bills
-  .filter(b => b.status === 'ACTIVE' || b.status === 'DRAFT')
+  .filter(b => b.status === 'ACTIVE' || (b.status === 'DRAFT' && !isEmptyDraft(b)))
   .sort((a, b) => a.createdAt.localeCompare(b.createdAt));
 const billLabel = b => `#${b.device ? b.device + '-' : ''}${b.billNo}`;
 const billName = b => b.customerName || (b.customerChosen ? `Walk-in ${billLabel(b)}` : `New bill ${billLabel(b)}`);
@@ -253,12 +255,20 @@ function dropBillItem(b, itemId) {
   cloud.removeBillEntry(b.id, 'items', itemId, totalsOf(b));
 }
 // amount > 0 = money received; < 0 = money paid out (scrap worth more than the purchase).
-function addPayment(b, amount, method) {
-  const p = { id: uid(), amount: round2(amount), method, at: now(), by: S.user.email };
+function addPayment(b, amount, method, itemIds = null) {
+  const p = { id: uid(), amount: round2(amount), method, at: now(), by: S.user.email, ...(itemIds?.length ? { itemIds } : {}) };
   b.payments = [...(b.payments || []), p];
   cloud.setBillEntry(b.id, 'payments', p, payStateOf(b));
   return p;
 }
+// Item-level PAID / DUE, shown once any payment on the bill names its items.
+const paidItemIds = b => new Set((b.payments || []).flatMap(p => p.itemIds || []));
+function itemPayTag(b, it) {
+  if (b.status !== 'COMPLETED' || b.isSettled || bundleNoCharge(it) || !(b.payments || []).some(p => p.itemIds)) return '';
+  return paidItemIds(b).has(it.id) ? 'PAID' : 'DUE';
+}
+const itemNames = (b, ids) => (ids || []).map(id => b.items.find(i => i.id === id)?.productName).filter(Boolean).join(', ');
+const payLine = (b, p) => `${p.amount < 0 ? 'Paid out' : 'Paid'} ${money(Math.abs(p.amount))} · ${fmtDate(p.at)}, ${fmtTime(p.at)}${p.method ? ' · ' + p.method : ''}${p.itemIds ? ' · for: ' + itemNames(b, p.itemIds) : ''}`;
 function removePayment(b, paymentId) {
   b.payments = b.payments.filter(p => p.id !== paymentId);
   cloud.removeBillEntry(b.id, 'payments', paymentId, payStateOf(b));
@@ -284,13 +294,57 @@ function duesByCustomer() {
 const getBundle = id => S.bundles.find(b => b.id === id);
 const openBundles = () => S.bundles.filter(b => b.status === 'OUT').sort(byTime('outAt'));
 const kg = q => fmtQty(round3(q), 'KG');
+const bundleGiven = bd => `Given ${kg(bd.outWeight)} kg ${bd.packing === 'BS' ? `BS (box ${kg(bd.boxWeight || 0)})` : 'Net'}`;
+const PENDING = 'Awaiting return';
 function bundleCalc(bd, retKg, withBox) {
   const box = bd.packing === 'BS' ? bd.boxWeight || 0 : 0;
   const back = retKg > 0 ? retKg : 0;
   const deductBox = box > 0 && !(back > 0 && withBox);
   const used = round3(bd.outWeight - back - (deductBox ? box : 0));
-  const note = `Bundle ${bd.packing === 'BS' ? 'BS' : 'Net'} ${kg(bd.outWeight)}${deductBox ? ` − box ${kg(box)}` : ''}${back ? ` − returned ${kg(back)}` : ''} = ${kg(used)} kg used`;
+  const returned = !back ? 'Not returned'
+    : bd.packing === 'BS' ? `Returned ${kg(back)} kg ${withBox ? 'with box' : 'without box'}` : `Returned ${kg(back)} kg`;
+  // Shown on the bill line: what was given, what came back, what is billed.
+  const note = [bundleGiven(bd), returned, `Net wire used ${kg(used)} kg`].join(' · ');
   return { box, back, deductBox, used, note };
+}
+const noteLines = note => String(note || '').split(' · ');
+// The customer's open bill, or a new one for them.
+function openBillFor(c) {
+  let bill = activeBills().filter(b => b.customerChosen && custKey(b) === custKey(c)).pop();
+  if (!bill) bill = createBill({ customerChosen: true, customerId: c.customerId || null, customerName: c.customerName || '', customerPhone: c.customerPhone || '', customerType: c.customerId ? 'REGULAR' : 'ONE_OFF' });
+  return bill;
+}
+// A bundle given out sits on the bill as an "awaiting return" line; the
+// return fills in that same line with the net wire used.
+function giveBundle(d, bill) {
+  const p = getProduct(d.productId);
+  const at = now();
+  const bd = {
+    id: uid(), status: 'OUT', customerId: bill.customerId || null, customerName: bill.customerName || '', customerPhone: bill.customerPhone || '',
+    productId: p.id, productName: p.name, rate: p.price, packing: d.packing, boxWeight: d.packing === 'BS' ? round3(num(d.box) || 0) : 0,
+    outWeight: round3(num(d.out) || 0), note: (d.note || '').trim(), outAt: at, outBy: S.user.email, updatedAt: at, billId: bill.id, itemId: uid(),
+  };
+  S.bundles.push(bd);
+  cloud.put('bundles', bd);
+  putBillItem(bill, {
+    id: bd.itemId, billId: bill.id, productId: p.id, productName: p.name, category: p.category, unit: 'KG', priceType: 'PER_KG',
+    allowDecimal: true, quantity: 0, rate: p.price, amount: 0, isNegative: false, pending: true, bundleId: bd.id,
+    note: `${bundleGiven(bd)} · ${PENDING}`, addedAt: at, addedBy: S.user.email,
+  }, bill.status === 'DRAFT' ? { status: 'ACTIVE' } : {});
+  if (d.packing === 'BS' && d.saveBox && bd.boxWeight && p.boxWeight !== bd.boxWeight) {
+    p.boxWeight = bd.boxWeight;
+    cloud.update('products', p.id, { boxWeight: bd.boxWeight, updatedAt: at });
+  }
+  return bd;
+}
+// Bill cancelled: the wire is still with the customer, so the bundle stays
+// out and will go on a new bill when it comes back.
+function detachBundle(id) {
+  const bd = getBundle(id);
+  if (!bd) return;
+  const reset = { status: 'OUT', billId: null, itemId: null, returnAt: null, returnNote: null, usedKg: null, amount: null, updatedAt: now() };
+  Object.assign(bd, reset);
+  cloud.update('bundles', id, reset);
 }
 const totalDue = () => round2(unpaidBills().reduce((s, b) => s + b.balance, 0));
 function deleteBill(b) {
@@ -310,7 +364,10 @@ function deviceCode() {
   }
   return code;
 }
-function createBill() {
+// Bills created on this phone in the last few seconds. Sync updates can
+// arrive before the new bill is in every query, so keep it visible meanwhile.
+const justCreated = new Map();
+function createBill(fields = {}) {
   const dev = deviceCode();
   const seen = allBills().filter(b => b.device === dev).map(b => b.billNo || 0);
   const no = Math.max(local.get('counter.' + dev, 0), S.counters[dev] || 0, ...seen) + 1;
@@ -320,16 +377,21 @@ function createBill() {
     id: uid(), billNo: no, device: dev, status: 'DRAFT', customerChosen: false,
     customerId: null, customerName: '', customerPhone: '', customerType: null,
     items: [], subtotal: 0, total: 0, createdAt: now(), updatedAt: now(), completedAt: null,
-    createdBy: S.user.email,
+    createdBy: S.user.email, ...fields,
   };
+  if (fields.customerName != null || fields.customerId) b.customerChosen = true;
   S.bills.push(b);
+  justCreated.set(b.id, { bill: b, at: Date.now() });
   cloud.put('bills', billToDoc(b));
   return b;
 }
 // Bills this phone opened with "Add to bill" and abandoned before choosing anyone.
+// Abandoned empty drafts from this phone are removed after 10 minutes (never
+// straight away, so a half-synced new bill can't be deleted by mistake).
 function purgeEmptyDrafts() {
   const mine = b => b.device === local.get('deviceCode') && b.createdBy === S.user.email;
-  for (const b of S.bills.filter(b => b.status === 'DRAFT' && !b.customerChosen && !b.items.length && mine(b))) deleteBill(b);
+  const old = b => Date.now() - new Date(b.updatedAt || b.createdAt) > 10 * 60e3;
+  for (const b of S.bills.filter(b => isEmptyDraft(b) && mine(b) && old(b) && !justCreated.has(b.id))) deleteBill(b);
 }
 function todayStats() {
   const t = now();
@@ -362,6 +424,10 @@ function onData(name, rows, meta) {
   else if (name === 'customers') S.customers = rows;
   else if (name === 'bills') {
     S.bills = rows.map(billFromDoc);
+    for (const [id, { bill, at }] of justCreated) {
+      if (S.bills.some(b => b.id === id) || Date.now() - at > 15e3) justCreated.delete(id);
+      else S.bills.push(bill);
+    }
     // Two phones recording payments at the same moment can leave the stored
     // "settled" flag out of date; whichever phone notices fixes it.
     if (!meta.fromCache && !meta.pending) {
@@ -421,12 +487,35 @@ document.addEventListener('focusout', () => setTimeout(flushRender, 60));
 
 // ---------------------------------------------------------------- routing
 let R = { a: '', b: '', c: '' };
+let payAfterRender = null; // "Part paid": open the payment screen once the finished bill shows
 
 function go(path, replace = false) {
   const h = '#' + path;
   if (location.hash === h) render();
-  else if (replace) location.replace(h);
-  else location.hash = h;
+  else if (replace) {
+    nav.replacing = true;
+    location.replace(h);
+  } else location.hash = h;
+}
+// In-app history, so Back returns to the screen you came from (same tab,
+// filter and scroll position) instead of a fixed parent screen.
+const nav = { stack: [location.hash || '#/'], replacing: false };
+const scrollMem = {};
+let restoreY = null;
+function onHashChange(e) {
+  scrollMem[new URL(e.oldURL).hash || '#/'] = window.scrollY;
+  const h = location.hash || '#/';
+  if (nav.replacing) nav.stack[nav.stack.length - 1] = h;
+  else if (nav.stack.length > 1 && nav.stack.at(-2) === h) {
+    nav.stack.pop();
+    restoreY = scrollMem[h] ?? 0;
+  } else nav.stack.push(h);
+  nav.replacing = false;
+  render();
+}
+function goBack(fallback) {
+  if (nav.stack.length > 1) history.back();
+  else go(fallback, true);
 }
 
 function render(keepScroll = false) {
@@ -441,10 +530,15 @@ function render(keepScroll = false) {
     : route(a, b, c);
   if (html == null) return; // redirected
   app.innerHTML = html;
-  window.scrollTo(0, keepScroll ? y : 0);
+  window.scrollTo(0, keepScroll ? y : restoreY ?? 0);
+  restoreY = null;
   updateSyncBadge();
   if (a === 'settings') fillStorageInfo();
   if (a === 'bundle') b === 'new' ? updateBundleNew() : updateBundleReturn();
+  if (payAfterRender && a === 'done' && b === payAfterRender) {
+    payAfterRender = null;
+    A.payBill({ dataset: { id: b } });
+  }
   const chip = $('.pchip.on');
   if (chip) chip.parentElement.scrollLeft = chip.offsetLeft - 60;
 }
@@ -474,6 +568,7 @@ function route(a, b, c) {
     case 'reports': return b === 'product' ? viewProductReport(decodeURIComponent(c)) : viewReports();
     case 'dues': return viewDues();
     case 'statement': return viewStatement(decodeURIComponent(b));
+    case 'settle': return viewSettlement(decodeURIComponent(b));
     case 'bundles': return viewBundles();
     case 'bundle': return b === 'new' ? viewBundleNew() : viewBundleReturn(b, c);
     case 'customers': return viewCustomers();
@@ -486,8 +581,11 @@ function route(a, b, c) {
 }
 
 // ---------------------------------------------------------------- shared bits
-function topbar(title, back, right = '') {
-  return `<header class="topbar">${back != null ? `<a class="tb-back" href="#${back}" aria-label="Back">‹</a>` : ''}<h1>${title}</h1>${right}</header>`;
+// smart = Back goes to the previous screen; billing screens keep a fixed parent.
+function topbar(title, back, right = '', smart = true) {
+  const btn = back == null ? '' : smart ? `<button type="button" class="tb-back" data-act="back" data-fb="${back}" aria-label="Back">‹</button>`
+    : `<a class="tb-back" href="#${back}" aria-label="Back">‹</a>`;
+  return `<header class="topbar">${btn}<h1>${title}</h1>${right}</header>`;
 }
 const micBtn = target => `<button type="button" class="mic" data-act="mic" data-target="${target}" aria-label="Speak name">🎤</button>`;
 
@@ -597,7 +695,7 @@ function viewActiveBills() {
 // --- customer selection for a bill
 function viewCustomerPick(bill) {
   const back = bill.customerChosen || bill.items.length ? `/bill/${bill.id}` : '/';
-  return `${topbar(`Bill ${billLabel(bill)} · Customer`, back)}
+  return `${topbar(`Bill ${billLabel(bill)} · Customer`, back, '', false)}
   <main class="page">
     <div class="search-row">
       <input id="custSearch" class="input big" type="search" placeholder="Type or 🎤 speak name" autocomplete="off" enterkeyhint="search">
@@ -622,10 +720,11 @@ function customerPickResults(q) {
 
 // --- product picker
 function viewAddItem(bill) {
-  return `${topbar(`Add item · ${esc(billName(bill))}`, `/bill/${bill.id}`)}
+  return `${topbar(`Add item · ${esc(billName(bill))}`, `/bill/${bill.id}`, '', false)}
   <main class="page has-footer">
     <input id="prodSearch" class="input big" type="search" placeholder="🔍 Search product…" autocomplete="off" enterkeyhint="go">
     <div class="btn-row"><button class="btn-mid newp" data-act="quickAdd">＋ NEW PRODUCT</button><button class="btn-mid newp" data-act="quickAddVoice">🎤 SPEAK NEW</button></div>
+    <button class="btn-mid bundle-btn" data-act="bundleInBill">🧵 GIVE WIRE BUNDLE (BS / Net)</button>
     <div id="prodResults">${productPickResults('')}</div>
   </main>
   <footer class="footbar">
@@ -664,13 +763,13 @@ function viewBill(bill) {
   const sec = billSections(bill);
   const c = bill.customerId ? getCustomer(bill.customerId) : null;
   const sub = [bill.customerPhone, bill.customerType === 'REGULAR' ? 'Regular' : 'One-off'].filter(Boolean).join(' · ');
-  return `${topbar(`Bill ${billLabel(bill)}`, '/', `<span class="status">${bill.status}</span>`)}
+  return `${topbar(`Bill ${billLabel(bill)}`, '/', `<span class="status">${bill.status}</span>`, false)}
   <nav class="switcher">
     ${act.map(b => `<button class="chip ${b.id === bill.id ? 'on' : ''}" data-act="openBill" data-id="${b.id}"><b>${esc(billName(b))}</b><small>${money(b.total)}</small></button>`).join('')}
     <button class="chip add" data-act="newBill">＋ New</button>
   </nav>
   <main class="page has-footer-lg">
-    ${bill.customerChosen ? openBundles().filter(bd => custKey(bd) === custKey(bill)).map(bd => `<a class="bundle-note" href="#/bundle/${bd.id}/${bill.id}">🧵 <span><b>${esc(bd.productName)} bundle out</b><small>${kg(bd.outWeight)} kg ${bd.packing === 'BS' ? 'BS' : 'Net'} · given ${fmtDate(bd.outAt)}</small></span><span class="link">Return &amp; bill</span></a>`).join('') : ''}
+    ${bill.customerChosen ? openBundles().filter(bd => custKey(bd) === custKey(bill) && bd.billId !== bill.id).map(bd => `<a class="bundle-note" href="#/bundle/${bd.id}/${bill.id}">🧵 <span><b>${esc(bd.productName)} bundle out</b><small>${kg(bd.outWeight)} kg ${bd.packing === 'BS' ? 'BS' : 'Net'} · given ${fmtDate(bd.outAt)}</small></span><span class="link">Return &amp; bill</span></a>`).join('') : ''}
     <button class="cust-card" data-act="changeCustomer">
       <span class="cc-ico">👤</span>
       <span class="cc-main"><small>CUSTOMER</small><b>${esc(billName(bill))}</b>${sub ? `<small>${esc(sub)}${c && c.notes ? ' · ' + esc(c.notes) : ''}</small>` : ''}</span>
@@ -695,11 +794,15 @@ function viewBill(bill) {
 }
 function itemRow(it) {
   const neg = it.amount < 0;
-  return `<button class="item ${neg ? 'neg' : ''}" data-act="editItem" data-id="${it.id}">
+  return `<button class="item ${neg ? 'neg' : ''} ${it.pending ? 'pending' : ''}" data-act="editItem" data-id="${it.id}">
     <span class="it-main"><span class="it-name">${esc(it.productName)}</span>
-    <span class="it-calc">${lineCalcText(it, neg)}</span>${it.note ? `<span class="it-note">🧵 ${esc(it.note)}</span>` : ''}</span>
-    <span class="it-amt">${money(it.amount)}</span></button>`;
+    <span class="it-calc">${it.bundleId ? '<span class="tag bundle">BUNDLE</span> ' : ''}${it.pending ? '<span>Tap when wire comes back</span>' : calcOrPending(it, neg)}</span>
+    ${it.note ? `<span class="it-note">${noteLines(it.note).map(l => `<span>${esc(l)}</span>`).join('')}</span>` : ''}</span>
+    <span class="it-amt">${it.pending ? '⏳' : amountOrPending(it)}</span></button>`;
 }
+const bundleNoCharge = it => it.pending || (it.bundleId && !it.quantity && !it.amount);
+const calcOrPending = (it, plain) => (bundleNoCharge(it) ? 'Wire bundle given' : lineCalcText(it, plain));
+const amountOrPending = it => (bundleNoCharge(it) ? '—' : money(it.amount));
 
 // --- receipt
 function receiptHtml(b) {
@@ -713,8 +816,8 @@ function receiptHtml(b) {
     <div class="r-cust">Customer: <b>${esc(billName(b))}</b>${b.customerPhone ? ` · ${esc(b.customerPhone)}` : ''}</div>
     ${(() => {
       const sec = billSections(b);
-      const line = it => `<div class="r-item ${it.amount < 0 ? 'neg' : ''}"><div class="r-name">${esc(it.productName)}</div>
-        <div class="r-line"><span>${lineCalcText(it, it.amount < 0)}</span><b>${money(it.amount)}</b></div>${it.note ? `<div class="r-note">${esc(it.note)}</div>` : ''}</div>`;
+      const line = it => `<div class="r-item ${it.amount < 0 ? 'neg' : ''}"><div class="r-name">${esc(it.productName)}${itemPayTag(b, it) ? ` <span class="tag ${itemPayTag(b, it) === 'PAID' ? 'paid' : 'due'}">${itemPayTag(b, it)}</span>` : ''}</div>
+        <div class="r-line"><span>${calcOrPending(it, it.amount < 0)}</span><b>${amountOrPending(it)}</b></div>${noteLines(it.note).filter(Boolean).map(l => `<div class="r-note">${esc(l)}</div>`).join('')}</div>`;
       if (!sec.scrap.length) return `<div class="r-items">${sec.sales.map(line).join('')}</div>`;
       return `${sec.sales.length ? `<div class="r-items">${sec.sales.map(line).join('')}</div>
         <div class="r-subtotal"><span>Items total</span><b>${money(sec.salesTotal)}</b></div>` : ''}
@@ -724,7 +827,7 @@ function receiptHtml(b) {
     })()}
     <div class="r-total"><span>${finalLabel(b)}</span>${b.status === 'CANCELLED' ? '<i class="stamp">CANCELLED</i>' : b.status !== 'COMPLETED' ? '' : b.isSettled ? '<i class="stamp ok">PAID</i>' : '<i class="stamp due">DUE</i>'}<b>${money(Math.abs(b.total))}</b></div>
     ${b.status === 'COMPLETED' && (b.payments.length > 1 || !b.isSettled) ? `<div class="r-pay">
-      ${b.payments.map(p => `<div><span>${p.amount < 0 ? 'Paid out' : 'Received'} · ${fmtDate(p.at)}${p.method ? ' · ' + esc(p.method) : ''}</span><b>${money(Math.abs(p.amount))}</b></div>`).join('')}
+      ${b.payments.map(p => `<div><span>${p.amount < 0 ? 'Paid out' : 'Received'} · ${fmtDate(p.at)}${p.method ? ' · ' + esc(p.method) : ''}${p.itemIds ? ` · for ${esc(itemNames(b, p.itemIds))}` : ''}</span><b>${money(Math.abs(p.amount))}</b></div>`).join('')}
       ${b.isSettled ? '' : `<div class="r-bal"><span>BALANCE ${b.balance < 0 ? 'TO PAY CUSTOMER' : 'DUE'}</span><b>${money(Math.abs(b.balance))}</b></div>`}
     </div>` : ''}
     <div class="r-foot">${plural(b.items.length, 'item')} · Thank you!</div>
@@ -733,7 +836,7 @@ function receiptHtml(b) {
 function paymentsPanel(b) {
   if (b.status !== 'COMPLETED' || b.legacyPaid) return '';
   return `<section class="card"><h2>Payments</h2>
-    ${b.payments.length ? b.payments.map(p => `<div class="pay-row"><span><b>${money(Math.abs(p.amount))}</b> ${p.amount < 0 ? 'paid out' : 'received'}<small>${fmtDate(p.at)}, ${fmtTime(p.at)}${p.method ? ' · ' + esc(p.method) : ''}</small></span>
+    ${b.payments.length ? b.payments.map(p => `<div class="pay-row"><span><b>${money(Math.abs(p.amount))}</b> ${p.amount < 0 ? 'paid out' : 'received'}<small>${fmtDate(p.at)}, ${fmtTime(p.at)}${p.method ? ' · ' + esc(p.method) : ''}</small>${p.itemIds ? `<small class="pay-for">for: ${esc(itemNames(b, p.itemIds))}</small>` : ''}</span>
       <button class="x" data-act="deletePayment" data-bill="${b.id}" data-id="${p.id}" aria-label="Delete payment">✕</button></div>`).join('') : '<p class="hint">No payment yet.</p>'}
     ${b.isSettled ? '<p class="settled-note">✓ Fully settled</p>' : `<p class="due-note">Balance ${b.balance < 0 ? 'to pay customer' : 'due'}: <b>${money(Math.abs(b.balance))}</b></p>
       <button class="btn-big go" data-act="payBill" data-id="${b.id}">${b.balance < 0 ? 'RECORD PAYOUT' : '₹ RECEIVE PAYMENT'}</button>`}
@@ -748,7 +851,7 @@ function receiptText(b) {
     '------------------------------',
     ...(() => {
       const sec = billSections(b);
-      const line = it => `${it.productName}\n  ${lineCalcText(it, it.amount < 0)} = ${money(it.amount)}${it.note ? `\n  (${it.note})` : ''}`;
+      const line = it => `${it.productName}${itemPayTag(b, it) ? ` [${itemPayTag(b, it)}]` : ''}\n  ${calcOrPending(it, it.amount < 0)} = ${amountOrPending(it)}${it.note ? noteLines(it.note).map(l => `\n    ${l}`).join('') : ''}`;
       if (!sec.scrap.length) return sec.sales.map(line);
       return [
         ...sec.sales.map(line), sec.sales.length && `Items total: ${money(sec.salesTotal)}`,
@@ -757,13 +860,13 @@ function receiptText(b) {
     })(),
     '------------------------------',
     `${finalLabel(b)}: ${money(Math.abs(b.total))}`,
-    b.status === 'COMPLETED' && !b.isSettled && `Paid: ${money(Math.abs(b.paid))}\nBALANCE DUE: ${money(Math.abs(b.balance))}`,
+    b.status === 'COMPLETED' && !b.isSettled && [...b.payments.map(p => payLine(b, p)), `BALANCE DUE: ${money(Math.abs(b.balance))}`].join('\n'),
     b.status === 'CANCELLED' ? '*** CANCELLED ***' : 'Thank you!',
   ];
   return lines.filter(Boolean).join('\n');
 }
 function viewReceipt(bill, back) {
-  return `${topbar(`Bill ${billLabel(bill)}`, back, `<span class="status">${bill.status}</span>`)}
+  return `${topbar(`Bill ${billLabel(bill)}`, back, `<span class="status">${bill.status}</span>`, back !== '/')}
   <main class="page">
     ${receiptHtml(bill)}
     ${paymentsPanel(bill)}
@@ -958,19 +1061,19 @@ const addDays = (d, n) => {
   x.setDate(x.getDate() + n);
   return x;
 };
-function periodRange() {
+function periodRange(period = rep.period, fromStr = rep.from, toStr = rep.to) {
   const d = new Date();
   d.setHours(0, 0, 0, 0);
   let from;
   let to;
-  switch (rep.period) {
+  switch (period) {
     case 'yesterday': from = addDays(d, -1); to = d; break;
     case 'week': from = addDays(d, -((d.getDay() + 6) % 7)); to = addDays(from, 7); break; // Monday start
     case 'month': from = new Date(d.getFullYear(), d.getMonth(), 1); to = new Date(d.getFullYear(), d.getMonth() + 1, 1); break;
     case 'lastmonth': from = new Date(d.getFullYear(), d.getMonth() - 1, 1); to = new Date(d.getFullYear(), d.getMonth(), 1); break;
     case 'custom':
-      from = rep.from ? new Date(rep.from + 'T00:00') : addDays(d, -6);
-      to = addDays(rep.to ? new Date(rep.to + 'T00:00') : d, 1);
+      from = fromStr ? new Date(fromStr + 'T00:00') : addDays(d, -6);
+      to = addDays(toStr ? new Date(toStr + 'T00:00') : d, 1);
       break;
     default: from = d; to = addDays(d, 1);
   }
@@ -1026,6 +1129,7 @@ function summarize(bills, r) {
 function productStats(bills) {
   const map = new Map();
   for (const b of bills) for (const it of b.items) {
+    if (it.pending) continue;
     const key = it.productId || 'n:' + it.productName.toLowerCase();
     const e = map.get(key) || { key, name: it.productName, unit: it.unit, qty: 0, amount: 0, bills: new Set() };
     if (e.unit === it.unit) e.qty = round3(e.qty + it.quantity);
@@ -1194,6 +1298,7 @@ function viewStatement(key) {
       ${due > 0 ? `<p class="due-big">Owes <b>${money(due)}</b></p><p class="hint">${plural(unpaid.length, 'unpaid bill')} · oldest ${fmtDate(unpaid[0].completedAt)}</p>
         <button class="btn-big go" data-act="payCustomer" data-key="${esc(key)}">₹ RECEIVE PAYMENT</button>`
         : due < 0 ? `<p class="due-big">You owe <b>${money(Math.abs(due))}</b></p>` : '<p class="settled-note">✓ No dues</p>'}
+      <a class="btn-mid settle-btn" href="#/settle/${encodeURIComponent(key)}">🧾 SETTLEMENT BILL</a>
     </section>
     ${(() => {
       const out = openBundles().filter(bd => custKey(bd) === key);
@@ -1249,17 +1354,10 @@ function viewBundles() {
 let bnDraft = null;
 const wireProducts = () => S.products.filter(p => p.active && (p.unit === 'KG' || p.category === 'WEIGHT') && p.price >= 0)
   .sort((a, b) => (b.boxWeight != null) - (a.boxWeight != null) || a.name.localeCompare(b.name));
-function viewBundleNew() {
-  if (!bnDraft) bnDraft = { customerId: null, customerName: '', customerPhone: '', productId: null, packing: 'BS', out: '', box: '', saveBox: true, note: '' };
-  const d = bnDraft;
+const newBundleDraft = extra => ({ customerId: null, customerName: '', customerPhone: '', productId: null, packing: 'BS', out: '', box: '', saveBox: true, note: '', billId: null, ...extra });
+function bundleFormHtml(d) {
   const p = d.productId ? getProduct(d.productId) : null;
-  return `${topbar('Give bundle', '/bundles')}
-  <main class="page">
-    <label class="lbl">CUSTOMER</label>
-    ${d.customerName ? `<div class="pick-done"><b>${esc(d.customerName)}</b><button type="button" class="link" data-act="bnClearCustomer">change</button></div>`
-      : `<div class="search-row"><input id="bnCust" class="input big" type="search" placeholder="Type or 🎤 speak name" autocomplete="off">${micBtn('bnCust')}</div>
-         <div id="bnCustResults" class="list">${bnCustomerResults('')}</div>`}
-    <label class="lbl">WIRE</label>
+  return `<label class="lbl">WIRE</label>
     <div class="ptiles">${wireProducts().map(w => `<button type="button" class="ptile ${w.id === d.productId ? 'sel' : ''}" data-act="bnPickProduct" data-id="${w.id}">
       <span class="pt-name">${esc(w.name)}</span><span class="pt-rate">${w.price ? rateText(w.price, w.priceType) : 'Enter rate'}${w.boxWeight ? ` · box ${kg(w.boxWeight)}` : ''}</span></button>`).join('') || '<p class="empty">Add wire products (unit KG) under Products first.</p>'}</div>
     <label class="lbl" for="bnOut">WEIGHT GIVEN (kg) — as shown on the scale</label>
@@ -1275,9 +1373,31 @@ function viewBundleNew() {
     <label class="lbl" for="bnNote">NOTE (optional)</label>
     <input id="bnNote" class="input big" autocomplete="off" value="${esc(d.note)}" placeholder="e.g. for motor rewinding">
     <div class="calc" id="bnCalc"></div>
-    <button type="button" class="btn-big go" id="bnGo" data-act="bnGive">GIVE BUNDLE</button>
+    <button type="button" class="btn-big go" id="bnGo" data-act="bnGive">GIVE BUNDLE</button>`;
+}
+function viewBundleNew() {
+  if (!bnDraft || bnDraft.billId) bnDraft = newBundleDraft();
+  const d = bnDraft;
+  return `${topbar('Give bundle', '/bundles')}
+  <main class="page">
+    <label class="lbl">CUSTOMER</label>
+    ${d.customerName ? `<div class="pick-done"><b>${esc(d.customerName)}</b><button type="button" class="link" data-act="bnClearCustomer">change</button></div>`
+      : `<div class="search-row"><input id="bnCust" class="input big" type="search" placeholder="Type or 🎤 speak name" autocomplete="off">${micBtn('bnCust')}</div>
+         <div id="bnCustResults" class="list">${bnCustomerResults('')}</div>`}
+    <p class="hint">The bundle is added to this customer's open bill as “awaiting return”, so other items can go on the same bill.</p>
+    ${bundleFormHtml(d)}
   </main>`;
 }
+// From the billing screen: the customer is the bill's customer.
+function openBundleSheet(billId) {
+  const bill = getBill(billId);
+  if (!bnDraft || bnDraft.billId !== billId) bnDraft = newBundleDraft({ billId, customerName: billName(bill) });
+  openSheet(`<div class="sheet-head"><div><div class="sh-title">Give wire bundle</div><div class="sh-sub">${esc(billName(bill))} · goes on this bill, billed when returned</div></div>
+    <button type="button" class="x" data-act="closeSheet" aria-label="Close">✕</button></div>
+    ${bundleFormHtml(bnDraft)}`);
+  updateBundleNew();
+}
+const refreshBundleForm = () => (bnDraft?.billId && !$('#sheet').hidden ? openBundleSheet(bnDraft.billId) : render(true));
 function bnCustomerResults(q) {
   const list = searchCustomers(q).slice(0, 8);
   let html = list.map(c => `<button type="button" class="row" data-act="bnPickCustomer" data-id="${c.id}"><span class="row-main"><b>${esc(c.name)}</b>${c.phone ? `<small>${esc(c.phone)}</small>` : ''}</span><span class="chev">›</span></button>`).join('');
@@ -1291,7 +1411,7 @@ function updateBundleNew() {
   const box = d.packing === 'BS' ? num(d.box) || 0 : 0;
   const ready = d.customerName && d.productId && out > 0 && box < out;
   $('#bnCalc').innerHTML = out > 0
-    ? (box ? `${kg(out)} kg − box ${kg(box)} kg<b>Wire given: ${kg(out - box)} kg</b>` : `<b>Wire given: ${kg(out)} kg</b>`)
+    ? (box ? `<span>${kg(out)} kg − box ${kg(box)} kg</span><b>Wire given: ${kg(out - box)} kg</b>` : `<b>Wire given: ${kg(out)} kg</b>`)
     : `<span>${!d.customerName ? 'Choose customer' : !d.productId ? 'Choose wire' : 'Enter weight'}</span><b>&nbsp;</b>`;
   $('#bnGo').disabled = !ready;
 }
@@ -1299,6 +1419,9 @@ function viewBundleReturn(id, billId) {
   const bd = getBundle(id);
   if (!bd) return S.loaded.bundles ? go('/bundles', true) : '<div class="boot">Loading…</div>';
   const p = getProduct(bd.productId);
+  const bill = bd.billId ? getBill(bd.billId) : null;
+  const billOpen = bill && ['ACTIVE', 'DRAFT'].includes(bill.status);
+  const billLink = bill ? `<a class="btn-mid" href="#/${billOpen ? 'bill' : 'receipt'}/${bill.id}">Open bill ${billLabel(bill)}</a>` : '';
   const head = `<section class="card">
       <p class="due-big"><b>${esc(bd.customerName || 'Walk-in customer')}</b></p>
       <p>${esc(bd.productName)} · <b>${kg(bd.outWeight)} kg</b> ${bd.packing === 'BS' ? `BS (box ${kg(bd.boxWeight || 0)} kg)` : 'Net'}</p>
@@ -1307,8 +1430,10 @@ function viewBundleReturn(id, billId) {
     return `${topbar('Bundle', '/bundles')}
     <main class="page">${head}
       <section class="card"><h2>Returned ${fmtDate(bd.returnAt)}</h2>
-        <p>${esc(bd.returnNote || '')}</p>
-        ${bd.billId && getBill(bd.billId) ? `<a class="btn-mid" href="#/${['ACTIVE', 'DRAFT'].includes(getBill(bd.billId).status) ? 'bill' : 'receipt'}/${bd.billId}">Open bill</a>` : ''}</section>
+        ${noteLines(bd.returnNote).map(l => `<p>${esc(l)}</p>`).join('')}
+        ${bd.usedKg ? `<p><b>${kg(bd.usedKg)} kg × ${money(bd.rate)} = ${money(bd.amount)}</b></p>` : ''}</section>
+      ${billLink}
+      ${billOpen ? '<button type="button" class="btn-mid" data-act="brUndo">↩ Re-enter returned weight</button>' : ''}
     </main>`;
   }
   if (!bnReturn || bnReturn.id !== id) bnReturn = { id, mode: 'some', back: '', withBox: true, rate: String(p?.price || bd.rate || '') };
@@ -1325,7 +1450,8 @@ function viewBundleReturn(id, billId) {
     <label class="lbl" for="brRate">RATE ₹ / kg</label>
     <input id="brRate" class="input big" inputmode="decimal" autocomplete="off" value="${esc(r.rate)}">
     <div class="calc" id="brCalc"></div>
-    <button type="button" class="btn-big go" id="brGo" data-act="brConfirm" data-bill="${billId || ''}">ADD TO CUSTOMER'S BILL</button>
+    <button type="button" class="btn-big go" id="brGo" data-act="brConfirm">ADD TO CUSTOMER'S BILL</button>
+    ${billLink}
     <button type="button" class="btn-text danger" data-act="brDelete">Delete this bundle entry</button>
   </main>`;
 }
@@ -1341,18 +1467,201 @@ function updateBundleReturn() {
   if (!bnReturn || !$('#brCalc')) return;
   const f = readReturn();
   const typed = bnReturn.mode === 'all' || num(bnReturn.back) > 0;
-  const ok = typed && f.used >= 0 && f.rate > 0;
+  const ok = typed && f.used >= 0 && (f.used === 0 || f.rate > 0);
   $('#brCalc').innerHTML = !typed ? '<span>Enter weight returned</span><b>&nbsp;</b>'
     : f.used < 0 ? `<span class="neg-text">Returned more than given — check the weight</span><b>&nbsp;</b>`
-    : `<span>${esc(f.note)}</span><b>${kg(f.used)} kg × ${money(f.rate)} = ${money(f.amount)}</b>`;
+    : `${noteLines(f.note).map(l => `<span class="calc-line">${esc(l)}</span>`).join('')}<b>${kg(f.used)} kg × ${money(f.rate)} = ${money(f.amount)}</b>`;
   $('#brGo').disabled = !ok;
   $('#brGo').textContent = typed && f.used === 0 ? 'CLOSE BUNDLE (NOTHING USED)' : 'ADD TO CUSTOMER\'S BILL';
 }
-function reopenBundle(id) {
-  const bd = getBundle(id);
-  if (!bd) return;
-  Object.assign(bd, { status: 'OUT', billId: null });
-  cloud.update('bundles', id, { status: 'OUT', billId: null, itemId: null, returnAt: null, returnNote: null, usedKg: null, updatedAt: now() });
+// --- printable documents
+// A document is a list of lines: { t: 'text'|'row'|'rule'|'gap', ... }. The
+// same list is drawn on screen, as a print/share image and as plain text.
+function docHtml(ops) {
+  return `<article class="receipt doc" id="receipt">${ops.map(o => {
+    if (o.t === 'rule') return `<hr class="${o.solid ? 'solid' : ''}">`;
+    if (o.t === 'gap') return '<div class="d-gap"></div>';
+    const cls = `${o.size >= 30 ? 'xl' : o.size >= 26 ? 'lg' : o.size && o.size <= 20 ? 'sm' : ''} ${o.bold ? 'b' : ''} ${o.cls || ''}`;
+    if (o.t === 'row') return `<div class="d-row ${cls}"><span>${esc(o.l)}</span><span>${esc(o.r)}</span></div>`;
+    return `<div class="d-text ${cls} ${o.align || ''}">${esc(o.s)}</div>`;
+  }).join('')}</article>`;
+}
+function docText(ops) {
+  return ops.map(o => (o.t === 'rule' ? '------------------------------' : o.t === 'gap' ? '' : o.t === 'row' ? `${o.l}  ${o.r}` : o.s)).join('\n');
+}
+function docCanvas(ops) {
+  const W = 576;
+  const P = 28;
+  const c = document.createElement('canvas');
+  c.width = W;
+  c.height = 300 + ops.length * 70;
+  const g = c.getContext('2d');
+  g.fillStyle = '#fff';
+  g.fillRect(0, 0, W, c.height);
+  g.fillStyle = '#000';
+  g.textBaseline = 'top';
+  let y = P;
+  const font = (size, bold) => (g.font = `${bold ? 700 : 400} ${size}px system-ui, -apple-system, "Segoe UI", Roboto, "Noto Sans", sans-serif`);
+  const wrap = (t, max) => {
+    const out = [];
+    let line = '';
+    for (const w of String(t).split(' ')) {
+      const next = line ? line + ' ' + w : w;
+      if (g.measureText(next).width > max && line) {
+        out.push(line);
+        line = w;
+      } else line = next;
+    }
+    return out.concat(line ? [line] : []);
+  };
+  const indent = t => (String(t).match(/^ */)[0].length) * 5; // leading spaces → left margin
+  for (const o of ops) {
+    const size = o.size || 22;
+    if (o.t === 'gap') y += 12;
+    else if (o.t === 'rule') {
+      g.setLineDash(o.solid ? [] : [8, 6]);
+      g.lineWidth = 2;
+      g.beginPath();
+      g.moveTo(P, y + 6);
+      g.lineTo(W - P, y + 6);
+      g.stroke();
+      y += 20;
+    } else if (o.t === 'row') {
+      font(size, o.bold);
+      const ind = indent(o.l);
+      const rw = g.measureText(o.r).width;
+      const lines = wrap(o.l.trim(), W - 2 * P - rw - 16 - ind);
+      g.textAlign = 'right';
+      g.fillText(o.r, W - P, y);
+      g.textAlign = 'left';
+      lines.forEach(l => {
+        g.fillText(l, P + ind, y);
+        y += Math.round(size * 1.3);
+      });
+    } else {
+      font(size, o.bold);
+      const ind = indent(o.s);
+      g.textAlign = o.align || 'left';
+      for (const l of wrap(o.s.trim(), W - 2 * P - ind)) {
+        g.fillText(l, o.align === 'center' ? W / 2 : P + ind, y);
+        y += Math.round(size * 1.3);
+      }
+    }
+  }
+  y += P;
+  const out = document.createElement('canvas');
+  out.width = W;
+  out.height = Math.min(y, c.height);
+  out.getContext('2d').drawImage(c, 0, 0);
+  return out;
+}
+
+// --- settlement bill: everything a customer took, returned and paid in a period
+const stl = { mode: 'due', from: '', to: '' };
+const STL_MODES = { due: 'Since oldest due', week: 'This week', month: 'This month', lastmonth: 'Last month', custom: 'Custom' };
+function settleRange(key) {
+  if (stl.mode !== 'due') return periodRange(stl.mode, stl.from, stl.to);
+  const oldest = unpaidBills().find(b => custKey(b) === key);
+  const start = new Date(oldest ? oldest.completedAt : Date.now());
+  start.setHours(0, 0, 0, 0);
+  const r = { from: start.toISOString(), to: addDays(new Date(new Date().setHours(0, 0, 0, 0)), 1).toISOString(), fromD: start };
+  r.toD = new Date(r.to);
+  r.label = `${fmtDate(start)} – ${fmtDate(new Date())}`;
+  return r;
+}
+function settlementData(key) {
+  const r = settleRange(key);
+  ensureRange(r);
+  const bills = allBills().filter(b => custKey(b) === key && b.status === 'COMPLETED' && b.completedAt >= r.from && b.completedAt < r.to).sort(byTime('completedAt'));
+  const sum = f => round2(bills.reduce((t, b) => t + f(b), 0));
+  const sales = sum(b => billSections(b).salesTotal);
+  const scrap = sum(b => billSections(b).scrapTotal);
+  const billed = sum(b => b.total);
+  const paid = sum(b => b.paid);
+  const due = sum(b => b.balance);
+  const allDue = round2(unpaidBills().filter(b => custKey(b) === key).reduce((t, b) => t + b.balance, 0));
+  return { r, bills, sales, scrap, billed, paid, due, olderDue: round2(allDue - due), allDue };
+}
+function settlementOps(key) {
+  const d = settlementData(key);
+  const sample = d.bills[0] || allBills().find(b => custKey(b) === key);
+  const c = getCustomer(key);
+  const name = c?.name || custKeyName(key, sample);
+  const phone = c?.phone || sample?.customerPhone || '';
+  const when = iso => `${fmtDate(iso).slice(0, 6)}, ${fmtTime(iso)}`;
+  const ops = [{ t: 'text', s: S.shop.shopName, size: 32, bold: true, align: 'center' }];
+  if (S.shop.shopAddress) ops.push({ t: 'text', s: S.shop.shopAddress, size: 20, align: 'center' });
+  if (S.shop.shopPhone) ops.push({ t: 'text', s: 'Ph: ' + S.shop.shopPhone, size: 20, align: 'center' });
+  ops.push({ t: 'text', s: 'SETTLEMENT BILL', size: 26, bold: true, align: 'center' }, { t: 'rule' },
+    { t: 'text', s: `Customer: ${name}${phone ? ' · ' + phone : ''}`, size: 24, bold: true },
+    { t: 'row', l: 'Period', r: d.r.label, size: 20 }, { t: 'row', l: 'Prepared', r: `${fmtDate(now())}, ${fmtTime(now())}`, size: 20 }, { t: 'rule' });
+  if (!d.bills.length) ops.push({ t: 'text', s: 'No completed bills in this period.', size: 22 });
+  for (const b of d.bills) {
+    ops.push({ t: 'row', l: `${fmtDate(b.completedAt)} · Bill ${billLabel(b)}`, r: fmtTime(b.completedAt), size: 23, bold: true });
+    const sec = billSections(b);
+    for (const it of [...sec.sales, ...sec.scrap]) {
+      const tag = itemPayTag(b, it);
+      ops.push({ t: 'row', l: `${fmtTime(it.addedAt || b.createdAt)}  ${it.productName}${it.amount < 0 ? ' (scrap)' : ''}${tag ? ` [${tag}]` : ''}`, r: amountOrPending(it), size: 22 });
+      ops.push({ t: 'text', s: `        ${calcOrPending(it, it.amount < 0)}`, size: 19 });
+      const bd = it.bundleId ? getBundle(it.bundleId) : null;
+      noteLines(it.note).filter(Boolean).forEach((l, i) => {
+        const at = bd && i === 0 ? ` (${when(bd.outAt)})` : bd && i === 1 && bd.returnAt ? ` (${when(bd.returnAt)})` : '';
+        ops.push({ t: 'text', s: `        ${l}${at}`, size: 19 });
+      });
+    }
+    ops.push({ t: 'row', l: '   Bill total', r: money(b.total), size: 22, bold: true });
+    b.payments.forEach(p => ops.push({ t: 'text', s: `   ${payLine(b, p)}`, size: 19 }));
+    if (!b.isSettled) ops.push({ t: 'row', l: '   Due on this bill', r: money(b.balance), size: 22, bold: true, cls: 'due' });
+    ops.push({ t: 'rule' });
+  }
+  const out = openBundles().filter(bd => custKey(bd) === key);
+  if (out.length) {
+    ops.push({ t: 'text', s: 'WIRE STILL WITH CUSTOMER (not billed yet)', size: 21, bold: true });
+    out.forEach(bd => ops.push({ t: 'text', s: `   ${bd.productName} · ${bundleGiven(bd)} · ${when(bd.outAt)}`, size: 19 }));
+    ops.push({ t: 'rule' });
+  }
+  ops.push({ t: 'text', s: 'SUMMARY', size: 24, bold: true },
+    { t: 'row', l: 'Bills', r: String(d.bills.length) },
+    { t: 'row', l: 'Purchases', r: money(d.sales) });
+  if (d.scrap) ops.push({ t: 'row', l: 'Scrap taken (minus)', r: money(d.scrap) });
+  ops.push({ t: 'row', l: 'Total billed', r: money(d.billed), bold: true }, { t: 'row', l: 'Paid', r: money(d.paid) });
+  if (d.olderDue) ops.push({ t: 'row', l: 'Due from these bills', r: money(d.due) }, { t: 'row', l: 'Older dues (before this period)', r: money(d.olderDue) });
+  ops.push({ t: 'rule', solid: true }, { t: 'row', l: d.allDue < 0 ? 'TO PAY CUSTOMER' : 'BALANCE DUE', r: money(Math.abs(d.allDue)), size: 30, bold: true },
+    { t: 'gap' }, { t: 'text', s: d.allDue ? 'Thank you!' : 'ALL SETTLED — Thank you!', size: 22, bold: true, align: 'center' });
+  return { ops, d, name };
+}
+function viewSettlement(key) {
+  const sample = allBills().find(b => custKey(b) === key);
+  if (!getCustomer(key) && !sample) return S.loaded.bills ? go('/customers', true) : '<div class="boot">Loading…</div>';
+  const { ops, d, name } = settlementOps(key);
+  const open = activeBills().filter(b => b.customerChosen && custKey(b) === key);
+  return `${topbar('Settlement', `/statement/${encodeURIComponent(key)}`)}
+  <main class="page">
+    <nav class="chips">${Object.entries(STL_MODES).map(([k, v]) => `<button class="pchip ${stl.mode === k ? 'on' : ''}" data-act="stlMode" data-p="${k}">${v}</button>`).join('')}</nav>
+    ${stl.mode === 'custom' ? `<div class="two"><div><label class="lbl" for="stlFrom">FROM</label><input id="stlFrom" type="date" class="input big" data-stl="from" value="${stl.from}"></div>
+      <div><label class="lbl" for="stlTo">TO</label><input id="stlTo" type="date" class="input big" data-stl="to" value="${stl.to}"></div></div>` : ''}
+    ${rep.loading ? '<p class="hint">Loading older bills…</p>' : ''}
+    ${open.map(b => `<a class="bundle-note" href="#/bill/${b.id}">⚠ <span><b>Open bill ${billLabel(b)} not completed</b><small>${plural(b.items.length, 'item')} · ${money(b.total)} — complete it to include it here</small></span><span class="link">Open</span></a>`).join('')}
+    ${docHtml(ops)}
+    <div class="btn-row">
+      <button class="btn-mid" data-act="shareSettlement" data-key="${esc(key)}">📤 SHARE</button>
+      <button class="btn-mid" data-act="printSettlement" data-key="${esc(key)}">🖨 PRINT</button>
+    </div>
+    ${d.allDue > 0 ? `<button class="btn-big go" data-act="payCustomer" data-key="${esc(key)}">₹ RECEIVE PAYMENT (${money(d.allDue)})</button>` : ''}
+  </main>`;
+}
+// Print on screen where the browser allows; otherwise share as an image (iPhone etc.).
+function printOrShare(makeCanvas, name, title) {
+  const viaImage = () => shareImage(makeCanvas(), name, title, true);
+  if (IS_IOS || typeof window.print !== 'function') return viaImage();
+  let started = false;
+  const mark = () => (started = true);
+  window.addEventListener('beforeprint', mark, { once: true });
+  window.print();
+  setTimeout(() => {
+    window.removeEventListener('beforeprint', mark);
+    if (!started) viaImage();
+  }, 700);
 }
 
 // --- receive / record a payment
@@ -1367,11 +1676,23 @@ function openPaySheet(ctx) {
     <input id="payIn" class="qty-input" inputmode="decimal" autocomplete="off" value="${Math.abs(ctx.balance)}">
     <div class="seg sign">${['Cash', 'UPI', 'Other'].map(m => `<button type="button" class="${m === 'Cash' ? 'on' : ''}" data-act="setMethod" data-m="${m}">${m}</button>`).join('')}</div>
     <p class="calc" id="payInfo"></p>
+    ${payItemsHtml(ctx)}
     ${ctx.mode === 'customer' ? '<p class="hint">Applied to the oldest unpaid bills first.</p>' : ''}
     <button type="button" class="btn-big go" id="payGo" data-act="savePayment">SAVE PAYMENT</button>`);
   updatePayInfo();
   $('#payIn').focus();
   $('#payIn').select();
+}
+function payItemsHtml(ctx) {
+  if (ctx.mode !== 'bill' || ctx.balance <= 0) return '';
+  const b = getBill(ctx.billId);
+  const paid = paidItemIds(b);
+  const list = b.items.filter(it => !paid.has(it.id) && !it.pending && it.amount);
+  if (list.length < 2) return '';
+  return `<label class="lbl">WHICH ITEMS ARE PAID NOW? (optional)</label>
+    <div class="pay-items">${list.map(it => `<label class="check"><input type="checkbox" class="payItem" value="${it.id}" data-amt="${it.amount}">
+      <span>${esc(it.productName)}</span><b class="${it.amount < 0 ? 'neg-text' : ''}">${money(it.amount)}</b></label>`).join('')}</div>
+    <p class="hint">Ticked items show as PAID on the bill; the rest stay DUE.</p>`;
 }
 function updatePayInfo() {
   if (!sheetCtx) return;
@@ -1459,18 +1780,18 @@ function closeSheet(fromRender = false) {
 $('#sheet').addEventListener('click', e => { if (e.target.id === 'sheet') closeSheet(); });
 
 // Resolves true (ok), false (cancel) or 'alt' (optional middle choice).
-function confirmBox({ title, body = '', ok = 'YES', cancel = 'NO', alt = null, danger = false, typeToConfirm = null }) {
+function confirmBox({ title, body = '', ok = 'YES', cancel = 'NO', alt = null, more = [], danger = false, typeToConfirm = null }) {
   return new Promise(resolve => {
     const m = $('#modal');
     m.innerHTML = `<div class="modal" role="alertdialog"><h3>${title}</h3>${body ? `<p>${body}</p>` : ''}
       ${typeToConfirm ? `<input id="mConfirm" class="input big" placeholder="Type ${typeToConfirm}" autocomplete="off">` : ''}
-      ${alt ? `<button class="btn-big go" data-m="1">${ok}</button><button class="btn-mid due" data-m="alt">${alt}</button><button class="btn-mid" data-m="0">${cancel}</button>`
+      ${alt ? `<button class="btn-big go" data-m="1">${ok}</button>${more.map(([v, label]) => `<button class="btn-mid part" data-m="${v}">${label}</button>`).join('')}<button class="btn-mid due" data-m="alt">${alt}</button><button class="btn-mid" data-m="0">${cancel}</button>`
         : `<div class="btn-row"><button class="btn-mid" data-m="0">${cancel}</button><button class="btn-mid ${danger ? 'danger-fill' : 'go'}" data-m="1">${ok}</button></div>`}</div>`;
     m.hidden = false;
     m.onclick = e => {
       const b = e.target.closest('[data-m]');
       if (!b && e.target !== m) return;
-      const yes = !b ? false : b.dataset.m === '1' ? true : b.dataset.m === 'alt' ? 'alt' : false;
+      const yes = !b ? false : b.dataset.m === '1' ? true : b.dataset.m === '0' ? false : b.dataset.m;
       if (yes === true && typeToConfirm && $('#mConfirm').value.trim().toUpperCase() !== typeToConfirm) {
         toast(`Type ${typeToConfirm} to confirm`, 'err');
         return;
@@ -1617,6 +1938,7 @@ function fillQuick(text) {
 // ---------------------------------------------------------------- actions
 const A = {
   closeSheet: () => closeSheet(),
+  back(el) { goBack(el.dataset.fb || '/'); },
 
   setLang(el) {
     if (local.get('lang', 'en') === el.dataset.l) return;
@@ -1720,6 +2042,7 @@ const A = {
     Object.assign(bnDraft, { customerId: c.id, customerName: c.name, customerPhone: c.phone || '' });
     render(true);
   },
+  bundleInBill() { openBundleSheet(R.b); },
   bnTypedCustomer() {
     Object.assign(bnDraft, { customerId: null, customerName: $('#bnCust').value.trim(), customerPhone: '' });
     render(true);
@@ -1732,11 +2055,11 @@ const A = {
     const p = getProduct(el.dataset.id);
     bnDraft.productId = p.id;
     bnDraft.box = p.boxWeight != null ? String(p.boxWeight) : bnDraft.box || '0.300';
-    render(true);
+    refreshBundleForm();
   },
   bnPacking(el) {
     bnDraft.packing = el.dataset.p;
-    render(true);
+    refreshBundleForm();
   },
   bnGive() {
     const d = bnDraft;
@@ -1744,64 +2067,79 @@ const A = {
     const out = round3(num(d.out) || 0);
     const box = d.packing === 'BS' ? round3(num(d.box) || 0) : 0;
     if (!d.customerName || !p || !(out > 0) || box >= out) return toast('Check customer, wire and weight', 'err');
-    const bd = {
-      id: uid(), status: 'OUT', customerId: d.customerId, customerName: d.customerName, customerPhone: d.customerPhone,
-      productId: p.id, productName: p.name, rate: p.price, packing: d.packing, boxWeight: box, outWeight: out,
-      note: d.note.trim(), outAt: now(), outBy: S.user.email, updatedAt: now(),
-    };
-    S.bundles.push(bd);
-    cloud.put('bundles', bd);
-    if (d.packing === 'BS' && d.saveBox && box && p.boxWeight !== box) cloud.update('products', p.id, { boxWeight: box, updatedAt: now() });
+    const inBill = !!d.billId;
+    const bill = inBill ? getBill(d.billId) : openBillFor(d);
+    if (!bill || !['ACTIVE', 'DRAFT'].includes(bill.status)) return toast('This bill was closed on another phone', 'err');
+    giveBundle(d, bill);
     bnDraft = null;
-    toast(`✓ Bundle given to ${bd.customerName}: ${kg(out)} kg`);
-    go('/bundles', true);
+    toast(`✓ Bundle given: ${kg(out)} kg`);
+    if (inBill) {
+      closeSheet(true);
+      render(true);
+    } else go(`/bill/${bill.id}`, true);
   },
   brMode(el) {
     bnReturn.mode = el.dataset.m;
     render(true);
   },
-  brConfirm(el) {
+  brConfirm() {
     const f = readReturn();
     const bd = f.bd;
     if (bd.status !== 'OUT') return toast('This bundle was already returned', 'err');
-    if (f.used < 0 || !(f.rate > 0)) return toast('Check the weight and rate', 'err');
+    if (f.used < 0 || (f.used > 0 && !(f.rate > 0))) return toast('Check the weight and rate', 'err');
     const at = now();
-    const closed = { status: 'RETURNED', returnWeight: f.back, returnedWithBox: bnReturn.withBox, usedKg: f.used, rate: f.rate, amount: f.amount, returnNote: f.note, returnAt: at, returnBy: S.user.email, updatedAt: at };
-    if (f.used === 0) {
-      Object.assign(bd, closed);
-      cloud.update('bundles', bd.id, closed);
-      bnReturn = null;
-      toast('Bundle closed — nothing used');
-      return go('/bundles', true);
-    }
-    // Add to the bill we came from, else the customer's open bill, else a new one.
-    let bill = getBill(el.dataset.bill);
-    if (!bill || !['ACTIVE', 'DRAFT'].includes(bill.status)) bill = activeBills().filter(b => b.customerChosen && custKey(b) === custKey(bd)).pop();
-    if (!bill) {
-      bill = createBill();
-      updateBill(bill, { customerChosen: true, customerId: bd.customerId, customerName: bd.customerName, customerPhone: bd.customerPhone || '', customerType: bd.customerId ? 'REGULAR' : 'ONE_OFF' });
+    // Fill in the bundle's own line if its bill is still open; otherwise bill
+    // it on the customer's open (or a new) bill.
+    let bill = getBill(bd.billId);
+    const own = bill?.items.find(i => i.id === bd.itemId);
+    const sameBill = !!own && ['ACTIVE', 'DRAFT'].includes(bill.status);
+    if (!sameBill) {
+      if (own) {
+        const moved = { ...own, pending: false, note: `${bundleGiven(bd)} · Returned later — billed separately` };
+        Object.assign(own, moved);
+        cloud.setBillEntry(bill.id, 'items', moved, {});
+      }
+      bill = openBillFor(bd);
     }
     const p = getProduct(bd.productId);
     const item = {
-      id: uid(), billId: bill.id, productId: bd.productId, productName: bd.productName, category: p?.category || 'WEIGHT',
-      unit: 'KG', priceType: 'PER_KG', allowDecimal: true, quantity: f.used, rate: f.rate, amount: f.amount,
-      isNegative: false, note: f.note, bundleId: bd.id, addedAt: at, addedBy: S.user.email,
+      ...(sameBill ? own : {}), id: sameBill ? own.id : uid(), billId: bill.id, productId: bd.productId, productName: bd.productName,
+      category: p?.category || 'WEIGHT', unit: 'KG', priceType: 'PER_KG', allowDecimal: true, quantity: f.used, rate: f.rate,
+      amount: f.amount, isNegative: false, pending: false, note: f.note, bundleId: bd.id, addedAt: sameBill ? own.addedAt : at, addedBy: S.user.email,
     };
     putBillItem(bill, item, bill.status === 'DRAFT' ? { status: 'ACTIVE' } : {});
-    Object.assign(bd, closed, { billId: bill.id });
-    cloud.update('bundles', bd.id, { ...closed, billId: bill.id, itemId: item.id });
+    const closed = {
+      status: 'RETURNED', returnWeight: f.back, returnedWithBox: bnReturn.withBox, usedKg: f.used, rate: f.rate, amount: f.amount,
+      returnNote: f.note, returnAt: at, returnBy: S.user.email, billId: bill.id, itemId: item.id, updatedAt: at,
+    };
+    Object.assign(bd, closed);
+    cloud.update('bundles', bd.id, closed);
     bnReturn = null;
-    toast(`✓ ${kg(f.used)} kg added to bill  ${money(f.amount)}`);
+    toast(f.used ? `✓ ${kg(f.used)} kg added to bill  ${money(f.amount)}` : 'Bundle closed — nothing used');
     go(`/bill/${bill.id}`, true);
+  },
+  brUndo() {
+    const bd = getBundle(R.b);
+    const bill = getBill(bd.billId);
+    const it = bill?.items.find(i => i.id === bd.itemId);
+    if (!it || !['ACTIVE', 'DRAFT'].includes(bill.status)) return toast('This bill was already closed on another phone', 'err');
+    putBillItem(bill, { ...it, quantity: 0, amount: 0, pending: true, note: `${bundleGiven(bd)} · ${PENDING}` });
+    const reset = { status: 'OUT', returnAt: null, returnNote: null, usedKg: null, amount: null, updatedAt: now() };
+    Object.assign(bd, reset);
+    cloud.update('bundles', bd.id, reset);
+    bnReturn = null;
+    render(true);
   },
   async brDelete() {
     const bd = getBundle(bnReturn.id);
     if (!await confirmBox({ title: 'Delete this bundle entry?', body: `${esc(bd.customerName)} · ${esc(bd.productName)} ${kg(bd.outWeight)} kg. Use this only if it was entered by mistake.`, ok: 'DELETE', danger: true })) return;
     S.bundles = S.bundles.filter(b => b.id !== bd.id);
     cloud.remove('bundles', bd.id);
+    const bill = getBill(bd.billId);
+    if (bill && ['ACTIVE', 'DRAFT'].includes(bill.status) && bill.items.some(i => i.id === bd.itemId)) dropBillItem(bill, bd.itemId);
     bnReturn = null;
     toast('Bundle entry deleted');
-    go('/bundles', true);
+    goBack('/bundles');
   },
 
   // --- quick-add new product while billing
@@ -1881,7 +2219,11 @@ const A = {
 
   // --- items
   pickProduct(el) { openQtySheet(R.b, el.dataset.id); },
-  editItem(el) { openQtySheet(R.b, null, el.dataset.id); },
+  editItem(el) {
+    const it = getBill(R.b)?.items.find(i => i.id === el.dataset.id);
+    if (it?.bundleId && getBundle(it.bundleId)) return go(`/bundle/${it.bundleId}/${R.b}`);
+    openQtySheet(R.b, null, el.dataset.id);
+  },
   toggleRate() {
     $('#rateBox').hidden = false;
     $('#rateIn').focus();
@@ -1933,8 +2275,7 @@ const A = {
     const it = bill.items.find(i => i.id === ctx.itemId);
     if (!await confirmBox({ title: `Remove ${esc(it.productName)}?`, body: `${lineCalcText(it)} = ${money(it.amount)}`, ok: 'REMOVE', danger: true })) return;
     dropBillItem(getBill(ctx.billId), it.id);
-    if (it.bundleId) reopenBundle(it.bundleId);
-    toast(it.bundleId ? 'Item removed — bundle is back in the list' : 'Item removed');
+    toast('Item removed');
     render(true);
   },
 
@@ -1951,8 +2292,10 @@ const A = {
     const out = bill.total < 0;
     const amt = out ? `Pay to customer <b>${money(Math.abs(bill.total))}</b>` : `Total <b>${money(bill.total)}</b>`;
     const choice = await confirmBox({
-      title: `Complete bill for ${esc(billName(bill))}?`, body: `${plural(bill.items.length, 'item')} · ${amt}`,
+      title: `Complete bill for ${esc(billName(bill))}?`,
+      body: `${plural(bill.items.length, 'item')} · ${amt}${bill.items.some(i => i.pending) ? `<br><span class="warn-text">⚠ ${plural(bill.items.filter(i => i.pending).length, 'wire bundle')} not returned yet — it will be billed on a new bill when returned.</span>` : ''}`,
       ok: out ? '✓ PAID OUT' : '✓ PAID', alt: out ? 'PAY LATER' : 'PAY LATER (DUE)', cancel: 'BACK',
+      more: out ? [] : [['part', 'PART PAID — choose items']],
     });
     if (!choice) return;
     bill = getBill(bill.id); // may have changed on the other phone meanwhile
@@ -1964,6 +2307,7 @@ const A = {
     adjustStock(bill);
     if (bill.customerId && getCustomer(bill.customerId)) cloud.update('customers', bill.customerId, { lastBilledAt: at });
     toast('✓ Bill completed');
+    if (choice === 'part') payAfterRender = bill.id;
     go(`/done/${bill.id}`, true);
   },
   async cancelBill() {
@@ -1973,7 +2317,7 @@ const A = {
     if (b) {
       if (b.items.length) updateBill(b, { status: 'CANCELLED', cancelledBy: S.user.email });
       else deleteBill(b);
-      b.items.filter(it => it.bundleId).forEach(it => reopenBundle(it.bundleId));
+      b.items.filter(it => it.bundleId).forEach(it => detachBundle(it.bundleId));
     }
     toast('Bill cancelled');
     go('/', true);
@@ -2014,6 +2358,22 @@ const A = {
     render(true);
   },
   shareReport() { shareText('Sales report', reportText()); },
+  stlMode(el) {
+    stl.mode = el.dataset.p;
+    if (stl.mode === 'custom' && !stl.from) {
+      stl.from = dayKey(addDays(new Date(), -6));
+      stl.to = dayKey(new Date());
+    }
+    render(true);
+  },
+  shareSettlement(el) {
+    const { ops, name } = settlementOps(el.dataset.key);
+    shareText(`Settlement — ${name}`, docText(ops));
+  },
+  printSettlement(el) {
+    const key = el.dataset.key;
+    printOrShare(() => docCanvas(settlementOps(key).ops), `settlement-${settlementOps(key).name.replace(/\W+/g, '-')}.png`, 'Settlement bill');
+  },
   shareStatement(el) { shareText('Statement', statementText(el.dataset.key)); },
   payBill(el) {
     const b = getBill(el.dataset.id);
@@ -2035,7 +2395,8 @@ const A = {
     if (!(amt > 0) || amt > Math.abs(ctx.balance) + 0.005) return toast('Check the amount', 'err');
     if (ctx.mode === 'bill') {
       const b = getBill(ctx.billId);
-      addPayment(b, Math.sign(b.balance) * amt, ctx.method);
+      const ids = [...document.querySelectorAll('.payItem:checked')].map(x => x.value);
+      addPayment(b, Math.sign(b.balance) * amt, ctx.method, ids);
     } else {
       // Oldest unpaid bills first.
       let left = amt;
@@ -2077,8 +2438,7 @@ const A = {
   // --- customers
   billForCustomer(el) {
     const c = getCustomer(el.dataset.id);
-    const b = createBill();
-    updateBill(b, { customerChosen: true, customerId: c.id, customerName: c.name, customerPhone: c.phone, customerType: 'REGULAR' });
+    const b = createBill({ customerChosen: true, customerId: c.id, customerName: c.name, customerPhone: c.phone || '', customerType: 'REGULAR' });
     go(`/bill/${b.id}/add`);
   },
   async deleteCustomer(el) {
@@ -2245,7 +2605,7 @@ function receiptCanvas(b) {
   const P = 28;
   const c = document.createElement('canvas');
   c.width = W;
-  c.height = 900 + b.items.length * 170 + (b.payments?.length || 0) * 40;
+  c.height = 900 + b.items.length * 210 + (b.payments?.length || 0) * 90;
   const g = c.getContext('2d');
   g.fillStyle = '#fff';
   g.fillRect(0, 0, W, c.height);
@@ -2306,9 +2666,9 @@ function receiptCanvas(b) {
   rule();
   const sec = billSections(b);
   const lines = list => list.forEach(it => {
-    text(it.productName, { size: 25, bold: true });
-    row('   ' + lineCalcText(it, it.amount < 0), money(it.amount));
-    if (it.note) text('   ' + it.note, { size: 20 });
+    text(it.productName + (itemPayTag(b, it) ? `  (${itemPayTag(b, it)})` : ''), { size: 25, bold: true });
+    row('   ' + calcOrPending(it, it.amount < 0), amountOrPending(it));
+    if (it.note) noteLines(it.note).forEach(l => text('      ' + l, { size: 20 }));
     y += 6;
   });
   lines(sec.sales);
@@ -2327,6 +2687,7 @@ function receiptCanvas(b) {
   rule(false);
   row(finalLabel(b), money(Math.abs(b.total)), { size: 34, bold: true });
   if (b.status === 'COMPLETED' && !b.isSettled) {
+    b.payments.forEach(p => text(payLine(b, p), { size: 20 }));
     row('Paid', money(Math.abs(b.paid)), { size: 24 });
     row('BALANCE DUE', money(Math.abs(b.balance)), { size: 28, bold: true });
   }
@@ -2340,16 +2701,18 @@ function receiptCanvas(b) {
   return out;
 }
 function shareBillImage(bill, forPrint = false) {
+  shareImage(receiptCanvas(bill), `bill-${billLabel(bill).slice(1)}.png`, `Bill ${billLabel(bill)}`, forPrint);
+}
+function shareImage(canvas, name, title, forPrint = false) {
   // Built synchronously so the share menu still counts as a response to the tap (needed on iPhone).
-  const url = receiptCanvas(bill).toDataURL('image/png');
+  const url = canvas.toDataURL('image/png');
   const bin = atob(url.split(',')[1]);
   const bytes = new Uint8Array(bin.length);
   for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
-  const name = `bill-${billLabel(bill).slice(1)}.png`;
   const file = new File([bytes], name, { type: 'image/png' });
   if (navigator.canShare?.({ files: [file] })) {
     if (forPrint) toast('Choose “Print” in the menu');
-    navigator.share({ files: [file], title: `Bill ${billLabel(bill)}` }).catch(e => {
+    navigator.share({ files: [file], title }).catch(e => {
       if (e.name !== 'AbortError') downloadBlob(file, name);
     });
   } else {
@@ -2450,8 +2813,15 @@ document.addEventListener('change', async e => {
   } else if (t.id === 'brWithBox') {
     bnReturn.withBox = t.checked;
     updateBundleReturn();
+  } else if (t.classList.contains('payItem')) {
+    const sum = round2([...document.querySelectorAll('.payItem:checked')].reduce((s2, x) => s2 + Number(x.dataset.amt), 0));
+    $('#payIn').value = sum > 0 ? sum : Math.abs(sheetCtx.balance);
+    updatePayInfo();
   } else if (t.id === 'qaScrap' || t.id === 'qaSave') {
     updateQuick();
+  } else if (t.dataset.stl) {
+    stl[t.dataset.stl] = t.value;
+    render(true);
   } else if (t.dataset.rep) {
     rep[t.dataset.rep] = t.value;
     render(true);
@@ -2493,7 +2863,7 @@ document.addEventListener('submit', async e => {
     if (dup && !await confirmBox({ title: `“${esc(d.name)}” already exists`, body: 'Save another customer with the same name?', ok: 'SAVE' })) return;
     saveCustomer(d, f.dataset.id ? getCustomer(f.dataset.id) : null);
     toast('✓ Customer saved');
-    go('/customers', true);
+    goBack('/customers');
   } else if (f.id === 'prodForm') {
     const name = (d.name || '').trim();
     if (!name) return toast('Enter product name', 'err');
@@ -2513,7 +2883,7 @@ document.addEventListener('submit', async e => {
     S.products = S.products.filter(x => x.id !== p.id).concat(p);
     cloud.put('products', p);
     toast('✓ Product saved');
-    go('/products', true);
+    goBack('/products');
   }
 });
 
@@ -2572,7 +2942,7 @@ function init() {
     if (user) unsubscribe = cloud.subscribe(onData, cloud.onError, recentCutoff());
     render();
   });
-  window.addEventListener('hashchange', () => render());
+  window.addEventListener('hashchange', onHashChange);
   render();
   checkLegacy().then(() => S.legacy && S.user && render(true));
   if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').catch(err => console.warn('SW', err));

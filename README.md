@@ -1,4 +1,4 @@
-# A One Enterprise — Billing & Weight Calculator (v2.4, cloud sync)
+# A One Enterprise — Billing & Weight Calculator (v2.6, cloud sync)
 
 Offline-first PWA for counter billing. Plain HTML/CSS/JS, no build step.
 Products, customers and bills sync live between phones through Firebase (Firestore),
@@ -68,13 +68,32 @@ Phones get the new version the next time the app is opened twice.
 Settings → **भाषा / Language** → हिंदी (per phone; also on the sign-in screen). Customer/product names, typed text,
 and the bill itself (screen receipt, print image, WhatsApp text) stay as they are. To change a Hindi word, edit `js/i18n.js`.
 
-## Wire bundles (v2.4)
+## Wire bundles (v2.5)
 
-Home → **🧵 Wire bundles** → **＋ Give bundle**: customer, wire, weight on the scale, **BS** (with box, box weight
-remembered per wire product) or **Net**. When the customer comes back, open the bundle (or tap the banner on their bill):
-enter the returned weight or tap **Used all**. Used wire = given − returned; the box weight is deducted only when the box
-doesn't come back. The line is added to the customer's open bill (or a new one) with the working shown, e.g.
-"Bundle BS 5.30 − box 0.30 = 5.00 kg used". Removing that line from the bill puts the bundle back on the list.
+Bundles live on the bill, next to the other items:
+- While billing (Add item screen) → **🧵 GIVE WIRE BUNDLE**: wire, weight on the scale, **BS** (with box; box weight
+  remembered per wire) or **Net**. The bill gets a line "Given 5.30 kg BS (box 0.30) · Awaiting return" (no charge yet).
+  Home → 🧵 Wire bundles → ＋ Give bundle does the same and puts it on the customer's open bill (or a new one).
+- When the customer comes back, tap that line → enter the returned weight or **Used all**. The same line becomes
+  "Given 5.30 kg BS (box 0.30) · Returned 2.15 kg with box · Net wire used 3.15 kg" and is charged on the net wire used.
+  Box weight is deducted only when the box doesn't come back. "↩ Re-enter returned weight" fixes a wrong entry.
+- Completing a bill while a bundle is still out warns first; when that bundle returns later it is billed on a new bill
+  and the old line says "Returned later — billed separately".
+
+## Part payments & settlement bill (v2.6)
+
+- Completing a bill: **✓ PAID** · **PART PAID — choose items** · **PAY LATER (DUE)**. Part paid opens Receive payment
+  with the bill's items as tick boxes; ticking fills in the amount. The bill then shows each item as PAID or DUE and
+  the payment as "₹930 · UPI · for: Bush, Impeller". The same item ticks are offered on any later payment of a bill.
+- Customer page → **🧾 SETTLEMENT BILL**: one document for the period (default: since the oldest unpaid bill; or
+  this week / this month / last month / custom) listing every visit with item times, wire bundles given/returned with
+  times and net wire used, every payment and what it covered, dues per bill, wire still out, and a summary
+  (purchases, scrap, total billed, paid, balance due). Share / Print, and **Receive payment** settles the oldest dues first.
+
+## Back button
+
+Back returns to the screen you came from (same report tab, period and scroll position), e.g. Reports → customer → Back
+returns to Reports. Billing screens keep their fixed parent (bill → home).
 
 ## Data notes
 
