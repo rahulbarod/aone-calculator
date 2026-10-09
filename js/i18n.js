@@ -170,6 +170,11 @@ const PHRASES = {
   '＋ Add row': '＋ लाइन जोड़ें', '⧉ Copy': '⧉ कॉपी', '✕ Remove': '✕ हटाएँ', 'Size e.g. 2.5 mm': 'साइज़ जैसे 2.5 mm', 'Brand': 'ब्रांड', 'Material': 'मटीरियल', 'Price ₹': 'रेट ₹',
   'Enter a price for every row': 'हर लाइन का रेट डालें', 'Add at least one size / brand / material row': 'कम से कम एक साइज़ / ब्रांड / मटीरियल लाइन जोड़ें',
   'Size': 'साइज़', 'e.g. 2.5 mm': 'जैसे 2.5 mm', 'e.g. Havells': 'जैसे Havells', 'e.g. SS': 'जैसे SS',
+  '🧮 QUICK CALCULATOR': '🧮 जल्दी हिसाब (कैलकुलेटर)', 'Quick calculator': 'जल्दी हिसाब', '🧮 Quick calculator': '🧮 जल्दी हिसाब',
+  'Start screen': 'शुरू का पेज', 'Home': 'होम', '＋ ADD TO ESTIMATE': '＋ अंदाज़े में जोड़ें', 'Estimate': 'अंदाज़ा (एस्टिमेट)',
+  '🧾 MAKE BILL': '🧾 बिल बनाएँ', 'Clear': 'साफ़ करें', 'Clear this estimate?': 'यह अंदाज़ा साफ़ करें?', 'CLEAR': 'साफ़ करें',
+  'Tap a product, then type the weight / length / quantity.': 'सामान चुनें, फिर वज़न / लंबाई / मात्रा डालें।', 'Enter the amount and rate': 'मात्रा और रेट डालें',
+  '✓ Bill made — choose the customer': '✓ बिल बना — ग्राहक चुनें',
   'English (India)': 'अंग्रेज़ी', 'Hindi': 'हिंदी', 'Marathi': 'मराठी', 'Gujarati': 'गुजराती', 'Punjabi': 'पंजाबी', 'Bengali': 'बांग्ला', 'Tamil': 'तमिल', 'Telugu': 'तेलुगु', 'Kannada': 'कन्नड़',
   'Connect to the internet first': 'पहले इंटरनेट चालू करें', 'Sample products already present': 'नमूना सामान पहले से है', 'All data cleared': 'सारा डेटा मिट गया',
 };

@@ -459,3 +459,11 @@ button.tb-back { color: #fff; }
 .paid-row { text-align: right; font-size: 14px; font-weight: 800; color: var(--muted); margin-top: -6px; }
 .vf { display: flex; flex-direction: column; gap: 2px; }
 .vf small { font-size: 12px; font-weight: 800; letter-spacing: .04em; }
+
+/* quick calculator */
+.btn-big.calc-hero { background: #fff; color: var(--brand); border: 3px solid var(--brand); min-height: 72px; font-size: 22px; }
+.card.calc-card { border-color: var(--brand-2); }
+.calc-head { display: flex; justify-content: space-between; align-items: center; font-size: 22px; }
+.calc-card .qty-input { height: 72px; font-size: 36px; }
+.calc-card .qty-input.rate { font-size: 28px; }
+.calc.big-calc b { font-size: 46px; }

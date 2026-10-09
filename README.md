@@ -1,4 +1,4 @@
-# A One Enterprise — Billing & Weight Calculator (v2.9, cloud sync)
+# A One Enterprise — Billing & Weight Calculator (v3.0, cloud sync)
 
 Offline-first PWA for counter billing. Plain HTML/CSS/JS, no build step.
 Products, customers and bills sync live between phones through Firebase (Firestore),
@@ -115,6 +115,14 @@ Product page → tick **Comes in different sizes / brands / materials (price for
 combination (Size · Brand · Material · Price; leave a box empty if it doesn't apply; ⧉ Copy duplicates a row). Products
 without the tick are unchanged. When billing, the size/brand/material buttons narrow each other down and the price fills
 in; the line shows e.g. "Cable · 2.5 mm · Local · Aluminium". Works for wire bundles too; Reports list each variant.
+
+## Quick calculator (v3.0)
+
+Home → **🧮 QUICK CALCULATOR** (or Settings → **Start screen: Quick calculator** so the phone opens on it).
+Tap a product, type the weight / length / quantity → total at once, using the rate from Products (changeable for this
+estimate; size/brand/material chosen for variant products). **＋ ADD TO ESTIMATE** builds a list with a total (scrap
+deducted) → **📤 Share** it, or **🧾 MAKE BILL** to turn it into a real bill (then choose the customer). The estimate is
+kept on that phone only.
 
 ## Back button
 

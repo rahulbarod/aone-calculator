@@ -5,7 +5,7 @@ import { scale } from './scale.js';
 import { parseProductSpeech } from './parse.js';
 import { startHindi } from './i18n.js';
 
-const APP_VERSION = '2.9.0';
+const APP_VERSION = '3.0.0';
 
 // ---------------------------------------------------------------- constants
 const UNITS = {
@@ -621,6 +621,7 @@ function render(keepScroll = false) {
   updateSyncBadge();
   if (a === 'settings') fillStorageInfo();
   if (a === 'bundle') b === 'new' ? updateBundleNew() : updateBundleReturn();
+  if (a === 'calc') updateCalcPage();
   if (payAfterRender && a === 'done' && b === payAfterRender) {
     payAfterRender = null;
     A.payBill({ dataset: { id: b } });
@@ -662,6 +663,7 @@ function route(a, b, c) {
     case 'products': return viewProducts();
     case 'product': return viewProductForm(b);
     case 'settings': return viewSettings();
+    case 'calc': return viewCalc();
     default: return go('/', true);
   }
 }
@@ -735,6 +737,7 @@ function viewHome() {
   <main class="page">
     ${setupCard()}
     <button class="btn-hero" data-act="newBill"><span>＋</span>ADD TO BILL</button>
+    <a class="btn-big calc-hero" href="#/calc">🧮 QUICK CALCULATOR</a>
     <a class="sec-head" href="#/bills"><span>ACTIVE BILLS${act.length ? `<i class="count">${act.length}</i>` : ''}</span><span class="more">All ›</span></a>
     ${act.length ? `<div class="list">${act.slice(0, 6).map(billCard).join('')}</div>` : '<p class="empty">No open bills right now</p>'}
     ${act.length > 6 ? `<a class="btn-text" href="#/bills">+${act.length - 6} more bills</a>` : ''}
@@ -1594,6 +1597,67 @@ function updateBundleReturn() {
   $('#brGo').disabled = !ok;
   $('#brGo').textContent = typed && f.used === 0 ? 'CLOSE BUNDLE (NOTHING USED)' : 'ADD TO CUSTOMER\'S BILL';
 }
+// --- quick calculator: price for any weight / length / quantity, and estimates
+// Kept on this phone only (not synced); "Make bill" turns the estimate into a real bill.
+const calc = Object.assign({ productId: null, varSel: {}, variant: null, rate: '', qty: '', lines: [] }, local.get('calc', {}));
+const saveCalc = () => local.set('calc', { ...calc, varSel: calc.varSel, variant: calc.variant });
+function calcLine() {
+  const p = getProduct(calc.productId);
+  if (!p) return null;
+  const qty = num(calc.qty) || 0;
+  const neg = (calc.variant ? calc.variant.price : p.price) < 0 || (!p.price && p.category === 'SCRAP');
+  const rate = (neg ? -1 : 1) * Math.abs(num(calc.rate) || 0);
+  return { p, qty, rate, amount: lineAmount(qty, rate, p.unit, p.priceType), label: withSize(p.name, calc.variant ? variantLabel(calc.variant) : '') };
+}
+function viewCalc() {
+  const p = getProduct(calc.productId);
+  const total = round2(calc.lines.reduce((t, l) => t + l.amount, 0));
+  return `${topbar('Quick calculator', '/', calc.lines.length ? '<button class="tb-act" data-act="calcShare">📤 Share</button>' : '')}
+  <main class="page">
+    ${p ? `<section class="card calc-card">
+      <div class="calc-head"><b>${esc(p.name)}</b><button type="button" class="link" data-act="calcClose">change</button></div>
+      ${hasVariants(p) ? `<div id="calcVarBox">${variantPicker(p, calc.varSel, 'calcVariant')}</div>` : ''}
+      <div class="two">
+        <div><label class="lbl" for="calcQty">${qtyWord(p.unit)} (${UNITS[p.unit]?.label || ''})</label>
+          <input id="calcQty" class="qty-input" inputmode="decimal" autocomplete="off" value="${esc(calc.qty)}" placeholder="0" enterkeyhint="done"></div>
+        <div><label class="lbl" for="calcRate">RATE ₹${PRICE_TYPES[p.priceType]?.per ? ' / ' + PRICE_TYPES[p.priceType].per : ''}</label>
+          <input id="calcRate" class="qty-input rate" inputmode="decimal" autocomplete="off" value="${esc(calc.rate)}" placeholder="0"></div>
+      </div>
+      <div class="calc big-calc" id="calcResult"></div>
+      <button type="button" class="btn-big go" id="calcAdd" data-act="calcAdd">＋ ADD TO ESTIMATE</button>
+    </section>` : '<p class="hint">Tap a product, then type the weight / length / quantity.</p>'}
+    ${calc.lines.length ? `<section class="card"><h2>Estimate</h2>
+      ${calc.lines.map((l, i) => `<div class="pay-row"><span><b>${esc(l.label)}</b><small>${fmtQty(l.qty, l.unit)} ${unitLabel(l.unit, l.qty)} × ${money(l.rate)}</small></span>
+        <b class="${l.amount < 0 ? 'neg-text' : ''}">${money(l.amount)}</b><button type="button" class="x" data-act="calcDel" data-i="${i}" aria-label="Remove">✕</button></div>`).join('')}
+      <div class="total-row"><span>TOTAL</span><b class="${total < 0 ? 'neg-text' : ''}">${money(total)}</b></div>
+      <div class="btn-row"><button type="button" class="btn-mid" data-act="calcClear">Clear</button><button type="button" class="btn-mid go" data-act="calcToBill">🧾 MAKE BILL</button></div>
+    </section>` : ''}
+    <input id="calcSearch" class="input big" type="search" placeholder="🔍 Search product…" autocomplete="off">
+    <div id="calcResults">${calcResults('')}</div>
+  </main>`;
+}
+function calcResults(q) {
+  const html = productPickResults(q).replace(/data-act="pickProduct"/g, 'data-act="calcPick"');
+  return html.replace(/<button class="btn-big alt" data-act="quickAdd"[^]*?<\/button>/g, '');
+}
+function updateCalcPage() {
+  const out = $('#calcResult');
+  if (!out) return;
+  const l = calcLine();
+  const p = l?.p;
+  const pending = p && hasVariants(p) && !calc.variant;
+  if (pending) out.innerHTML = '<span>Choose size / brand / material</span><b>&nbsp;</b>';
+  else if (l && l.qty > 0 && l.rate) out.innerHTML = `${fmtQty(l.qty, p.unit)} ${unitLabel(p.unit, l.qty)} × ${money(l.rate)}<b class="${l.amount < 0 ? 'neg-text' : ''}">= ${money(l.amount)}</b>`;
+  else out.innerHTML = `<span>${l && l.rate ? 'Enter ' + qtyWord(p.unit).toLowerCase() : 'Enter rate'}</span><b>&nbsp;</b>`;
+  $('#calcAdd').disabled = !(l && l.qty > 0 && l.rate && !pending);
+}
+function calcText() {
+  const total = round2(calc.lines.reduce((t, l) => t + l.amount, 0));
+  return [`${S.shop.shopName} — ESTIMATE`, `${fmtDate(now())}, ${fmtTime(now())}`, '------------------------------',
+    ...calc.lines.map(l => `${l.label}\n  ${fmtQty(l.qty, l.unit)} ${unitLabel(l.unit, l.qty)} × ${money(l.rate)} = ${money(l.amount)}`),
+    '------------------------------', `TOTAL: ${money(total)}`, '(Estimate — not a bill)'].join('\n');
+}
+
 // --- printable documents
 // A document is a list of lines: { t: 'text'|'row'|'rule'|'gap', ... }. The
 // same list is drawn on screen, as a print/share image and as plain text.
@@ -1833,6 +1897,10 @@ function viewSettings() {
   return `${topbar('Settings', '/')}
   <main class="page">
     ${langSwitch()}
+    <section class="card"><h2>Start screen <small>(this phone)</small></h2>
+      <div class="seg sign"><button type="button" class="${local.get('startPage', 'home') === 'home' ? 'on' : ''}" data-act="setStart" data-p="home">Home</button>
+        <button type="button" class="${local.get('startPage', 'home') === 'calc' ? 'on' : ''}" data-act="setStart" data-p="calc">🧮 Quick calculator</button></div>
+    </section>
     <section class="card"><h2>Account & sync</h2>
       <p>Signed in as <b>${esc(S.user.email)}</b></p>
       <p><span class="sync-badge"></span></p>
@@ -2071,6 +2139,72 @@ const A = {
   closeSheet: () => closeSheet(),
   back(el) { goBack(el.dataset.fb || '/'); },
 
+  setStart(el) {
+    local.set('startPage', el.dataset.p);
+    el.parentElement.querySelectorAll('button').forEach(b => b.classList.toggle('on', b === el));
+    toast('✓ Saved');
+  },
+  calcPick(el) {
+    const p = getProduct(el.dataset.id);
+    Object.assign(calc, { productId: p.id, varSel: {}, variant: null, qty: '' });
+    calc.variant = hasVariants(p) ? settleVariant(p, calc.varSel) : null;
+    calc.rate = String(Math.abs(calc.variant ? calc.variant.price : p.price) || '');
+    saveCalc();
+    render();
+    $('#calcQty')?.focus();
+  },
+  calcVariant(el) {
+    const p = getProduct(calc.productId);
+    calc.variant = chooseVariant(p, calc.varSel, el.dataset.k, el.dataset.v);
+    calc.rate = calc.variant ? String(Math.abs(calc.variant.price) || '') : '';
+    saveCalc();
+    $('#calcVarBox').innerHTML = variantPicker(p, calc.varSel, 'calcVariant');
+    $('#calcRate').value = calc.rate;
+    updateCalcPage();
+  },
+  calcClose() {
+    calc.productId = null;
+    saveCalc();
+    render(true);
+  },
+  calcAdd() {
+    const l = calcLine();
+    if (!l || !(l.qty > 0) || !l.rate) return toast('Enter the amount and rate', 'err');
+    calc.lines.push({ productId: l.p.id, name: l.p.name, label: l.label, variant: calc.variant ? variantLabel(calc.variant) : '', variantId: calc.variant?.id || null,
+      category: l.p.category, unit: l.p.unit, priceType: l.p.priceType, qty: l.qty, rate: l.rate, amount: l.amount });
+    calc.qty = '';
+    saveCalc();
+    toast(`✓ ${l.label}  ${money(l.amount)}`);
+    render(true);
+    $('#calcQty')?.focus();
+  },
+  calcDel(el) {
+    calc.lines.splice(Number(el.dataset.i), 1);
+    saveCalc();
+    render(true);
+  },
+  async calcClear() {
+    if (!await confirmBox({ title: 'Clear this estimate?', ok: 'CLEAR', danger: true })) return;
+    calc.lines = [];
+    saveCalc();
+    render(true);
+  },
+  calcShare() { shareText('Estimate', calcText()); },
+  calcToBill() {
+    const bill = createBill();
+    const at = now();
+    for (const l of calc.lines) {
+      putBillItem(bill, {
+        id: uid(), billId: bill.id, productId: l.productId, productName: l.name, category: l.category, unit: l.unit, priceType: l.priceType,
+        allowDecimal: true, quantity: l.qty, rate: l.rate, amount: l.amount, isNegative: l.amount < 0, addedAt: at, addedBy: S.user.email,
+        ...(l.variant ? { variant: l.variant, variantId: l.variantId } : {}),
+      }, { status: 'ACTIVE' });
+    }
+    calc.lines = [];
+    saveCalc();
+    toast('✓ Bill made — choose the customer');
+    go(`/bill/${bill.id}/customer`);
+  },
   setLang(el) {
     if (local.get('lang', 'en') === el.dataset.l) return;
     local.set('lang', el.dataset.l);
@@ -2997,6 +3131,9 @@ document.addEventListener('click', e => {
 const INPUTS = {
   custSearch: v => ($('#custResults').innerHTML = customerPickResults(v)),
   prodSearch: v => ($('#prodResults').innerHTML = productPickResults(v)),
+  calcSearch: v => ($('#calcResults').innerHTML = calcResults(v)),
+  calcQty: v => { calc.qty = v; saveCalc(); updateCalcPage(); },
+  calcRate: v => { calc.rate = v; saveCalc(); updateCalcPage(); },
   custAdminSearch: v => ($('#custAdminResults').innerHTML = customerAdminResults(v)),
   prodAdminSearch: v => ($('#prodAdminResults').innerHTML = productAdminResults(v)),
   histSearch: v => ($('#histResults').innerHTML = historyResults(v)),
@@ -3036,6 +3173,9 @@ const ENTER = {
   ooPhone: () => A.confirmOneOff(),
   emuEmail: () => A.emuSignIn(),
   prodSearch: () => $('#prodResults [data-act="pickProduct"]')?.click(),
+  calcSearch: () => $('#calcResults [data-act="calcPick"]')?.click(),
+  calcQty: () => A.calcAdd(),
+  calcRate: () => A.calcAdd(),
   custSearch: () => $('#custResults [data-act]')?.click(),
 };
 document.addEventListener('keydown', e => {
@@ -3183,6 +3323,10 @@ async function checkLegacy() {
 
 function init() {
   if (local.get('lang', 'en') === 'hi') startHindi();
+  if ((location.hash || '#/') === '#/' && local.get('startPage', 'home') === 'calc') {
+    history.replaceState(null, '', '#/calc');
+    nav.stack = ['#/calc'];
+  }
   cloud.onError = e => {
     console.error(e);
     if (e.code === 'permission-denied') {
