@@ -447,3 +447,15 @@ button.tb-back { color: #fff; }
 /* wire size chips */
 .size-chips { display: flex; flex-wrap: wrap; gap: 6px; }
 .size-chips .pchip { min-width: 58px; min-height: 48px; font-size: 17px; }
+
+/* variants table + bill editing */
+.var-switch { font-weight: 800; color: var(--brand); }
+.card.var-card { border-color: var(--brand-2); background: #f3f8fd; }
+.var-row { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; padding: 10px 0; border-bottom: 1px dashed var(--line); }
+.var-row .input { min-height: 48px; font-size: 17px; padding: 8px 10px; }
+.var-btns { grid-column: 1 / -1; display: flex; justify-content: space-between; }
+.danger-link { color: var(--neg); }
+.btn-mid.edit-btn { border-color: var(--brand-2); color: var(--brand); font-size: 15px; }
+.paid-row { text-align: right; font-size: 14px; font-weight: 800; color: var(--muted); margin-top: -6px; }
+.vf { display: flex; flex-direction: column; gap: 2px; }
+.vf small { font-size: 12px; font-weight: 800; letter-spacing: .04em; }

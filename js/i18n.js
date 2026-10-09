@@ -161,12 +161,23 @@ const PHRASES = {
   'Products, customers and shop settings are kept. Bill numbers start again from 1.': 'सामान, ग्राहक और दुकान की सेटिंग रहेंगी। बिल नंबर फिर 1 से शुरू होंगे।',
   'WIRE SIZE': 'वायर साइज़', 'Other size': 'दूसरा साइज़', 'Choose wire size': 'वायर साइज़ चुनें',
   'Ask wire size when billing (e.g. 1.0, 0.9, 1.3)': 'बिल में वायर साइज़ पूछें (जैसे 1.0, 0.9, 1.3)',
+  'SIZE': 'साइज़', 'BRAND': 'ब्रांड / कंपनी', 'MATERIAL': 'मटीरियल', 'Choose size / brand / material': 'साइज़ / ब्रांड / मटीरियल चुनें',
+  'NAME ON BILL': 'बिल पर नाम', '✎ EDIT BILL — add items, change customer, qty or rate': '✎ बिल बदलें — आइटम जोड़ें, ग्राहक, मात्रा या रेट बदलें',
+  '✎ EDIT': '✎ बदलें', 'This bill is already open': 'यह बिल पहले से खुला है', 'EDIT PRICES': 'रेट बदलें',
+  'The bill opens again: change the customer, add items, change quantities or rates. Payments already received are kept. Tap COMPLETE again when done.': 'बिल फिर से खुलेगा: ग्राहक, आइटम, मात्रा या रेट बदलें। मिले हुए पैसे बने रहेंगे। काम होने पर फिर "पूरा करें" दबाएँ।',
+  'Comes in different sizes / brands / materials (price for each)': 'अलग-अलग साइज़ / ब्रांड / मटीरियल में आता है (हर एक का अलग रेट)',
+  'Sizes · Brands · Materials': 'साइज़ · ब्रांड · मटीरियल', 'One row for each combination with its own price. Leave a box empty if it doesn\'t apply.': 'हर जोड़ी के लिए एक लाइन, अपने रेट के साथ। जो लागू न हो वो खाली छोड़ें।',
+  '＋ Add row': '＋ लाइन जोड़ें', '⧉ Copy': '⧉ कॉपी', '✕ Remove': '✕ हटाएँ', 'Size e.g. 2.5 mm': 'साइज़ जैसे 2.5 mm', 'Brand': 'ब्रांड', 'Material': 'मटीरियल', 'Price ₹': 'रेट ₹',
+  'Enter a price for every row': 'हर लाइन का रेट डालें', 'Add at least one size / brand / material row': 'कम से कम एक साइज़ / ब्रांड / मटीरियल लाइन जोड़ें',
+  'Size': 'साइज़', 'e.g. 2.5 mm': 'जैसे 2.5 mm', 'e.g. Havells': 'जैसे Havells', 'e.g. SS': 'जैसे SS',
   'English (India)': 'अंग्रेज़ी', 'Hindi': 'हिंदी', 'Marathi': 'मराठी', 'Gujarati': 'गुजराती', 'Punjabi': 'पंजाबी', 'Bengali': 'बांग्ला', 'Tamil': 'तमिल', 'Telugu': 'तेलुगु', 'Kannada': 'कन्नड़',
   'Connect to the internet first': 'पहले इंटरनेट चालू करें', 'Sample products already present': 'नमूना सामान पहले से है', 'All data cleared': 'सारा डेटा मिट गया',
 };
 
 // Texts that contain numbers, amounts or names.
 const PATTERNS = [
+  [/^Edit bill (#\S+)\?$/, 'बिल $1 बदलें?'], [/^Paid earlier (₹[\d,.]+) · Balance (-?₹[\d,.]+)$/, 'पहले मिले $1 · बाकी $2'],
+  [/^(\d+) options? · /, '$1 विकल्प · '], [/\b(\d+) variants?\b/, '$1 वेरिएंट'],
   [/^Delete bill (#\S+)\?$/, 'बिल $1 हटाएँ?'], [/^⏳ wire out · /, '⏳ वायर बाहर · '], [/ · due (₹.*)$/, ' · बकाया $1'],
   [/^(.*)\. It disappears from history, reports and dues on every phone(.*)\. This can't be undone\.$/, (m, a2, b2) => `${a2}। यह हर फ़ोन पर पुराने बिल, रिपोर्ट और बकाया से हट जाएगा${b2 ? ' (वायर बंडल भी)' : ''}। वापस नहीं आएगा।`],
   [/^⏳ (\d+) wire bundles? not returned yet — the bill stays open.*$/, '⏳ $1 वायर बंडल अभी वापस नहीं आया — बिल खुला रहेगा, लौटने पर इस्तेमाल हुआ वायर इसी बिल में जुड़ेगा।'],

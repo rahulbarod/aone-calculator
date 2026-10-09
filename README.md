@@ -1,4 +1,4 @@
-# A One Enterprise — Billing & Weight Calculator (v2.8, cloud sync)
+# A One Enterprise — Billing & Weight Calculator (v2.9, cloud sync)
 
 Offline-first PWA for counter billing. Plain HTML/CSS/JS, no build step.
 Products, customers and bills sync live between phones through Firebase (Firestore),
@@ -102,6 +102,19 @@ Bundles live on the bill, next to the other items:
 Products with "wire" in the name (or with **Ask wire size when billing** ticked on the product page) ask for a size
 (0.5 … 1.5 buttons, or type any other size — new sizes are remembered) when sold and when a bundle is given. The size
 shows with the name everywhere ("Copper Wire · 1.0") and Reports list each size separately.
+
+## Editing a completed bill (v2.9)
+
+Open the bill → **✎ EDIT BILL**. It reopens (same bill number and date): change the customer, add items, change
+quantity, rate or the name on the bill. Payments already received are kept; completing again shows
+"Paid earlier ₹X · Balance ₹Y" and **✓ PAID** records only the balance.
+
+## Products with sizes / brands / materials (v2.9)
+
+Product page → tick **Comes in different sizes / brands / materials (price for each)**. A table opens: one row per
+combination (Size · Brand · Material · Price; leave a box empty if it doesn't apply; ⧉ Copy duplicates a row). Products
+without the tick are unchanged. When billing, the size/brand/material buttons narrow each other down and the price fills
+in; the line shows e.g. "Cable · 2.5 mm · Local · Aluminium". Works for wire bundles too; Reports list each variant.
 
 ## Back button
 
