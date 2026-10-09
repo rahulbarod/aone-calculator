@@ -5,7 +5,7 @@ import { scale } from './scale.js';
 import { parseProductSpeech } from './parse.js';
 import { startHindi } from './i18n.js';
 
-const APP_VERSION = '3.0.0';
+const APP_VERSION = '3.1.0';
 
 // ---------------------------------------------------------------- constants
 const UNITS = {
@@ -1440,16 +1440,55 @@ function statementText(key) {
     '------------------------------', due ? `TOTAL DUE: ${money(due)}` : 'No dues. Thank you!',
   ].join('\n');
 }
+// Dues: by customer (who owes how much) or by date (which day's bills are still unpaid).
+const duesView = { tab: local.get('duesTab', 'customer'), period: 'all' };
+const DUE_PERIODS = { all: 'All', today: 'Today', yesterday: 'Yesterday', week: 'This week', month: 'This month' };
 function viewDues() {
   const groups = duesByCustomer();
   const total = totalDue();
-  const days = iso => Math.floor((Date.now() - new Date(iso)) / 864e5);
+  const days = iso => {
+    const n = Math.round((new Date().setHours(0, 0, 0, 0) - new Date(iso).setHours(0, 0, 0, 0)) / 864e5);
+    return n <= 0 ? 'today' : n === 1 ? 'yesterday' : `${n} days ago`;
+  };
+  const tabs = `<div class="seg tabs">${[['customer', 'By customer'], ['date', 'By date']].map(([k, v]) => `<button type="button" class="${duesView.tab === k ? 'on' : ''}" data-act="duesTab" data-t="${k}">${v}</button>`).join('')}</div>`;
+  let body;
+  if (duesView.tab === 'date') {
+    const r = duesView.period === 'all' ? null : periodRange(duesView.period);
+    const inRange = iso => !r || (iso >= r.from && iso < r.to);
+    const bills = unpaidBills().filter(b => (Math.abs(b.balance) >= 0.005 || b.wireOut) && inRange(b.completedAt)).sort(byTime('completedAt')).reverse();
+    const due = round2(bills.reduce((t, b) => t + b.balance, 0));
+    const received = r ? round2(allBills().flatMap(b => b.payments || []).filter(p => p.amount > 0 && inRange(p.at)).reduce((t, p) => t + p.amount, 0)) : null;
+    const groupsByDay = [];
+    for (const b of bills) {
+      const d = dayKey(b.completedAt);
+      if (!groupsByDay.length || groupsByDay.at(-1).d !== d) groupsByDay.push({ d, at: b.completedAt, bills: [] });
+      groupsByDay.at(-1).bills.push(b);
+    }
+    const today = dayKey(new Date());
+    const yest = dayKey(addDays(new Date(), -1));
+    const dayName = g => (g.d === today ? 'Today · ' : g.d === yest ? 'Yesterday · ' : '') + fmtDate(g.at);
+    body = `<nav class="chips">${Object.entries(DUE_PERIODS).map(([k, v]) => `<button class="pchip ${duesView.period === k ? 'on' : ''}" data-act="duesPeriod" data-p="${k}">${v}</button>`).join('')}</nav>
+      ${r ? `<div class="stats">
+        <div class="stat"><span>STILL DUE</span><b class="${due > 0 ? 'due-text' : ''}">${money(due)}</b><small>from ${plural(bills.length, 'bill')} made ${DUE_PERIODS[duesView.period].toLowerCase()}</small></div>
+        <div class="stat"><span>CASH RECEIVED</span><b>${money(received)}</b><small>${DUE_PERIODS[duesView.period].toLowerCase()}</small></div></div>` : ''}
+      ${groupsByDay.length ? groupsByDay.map(g => {
+        const t = round2(g.bills.reduce((x, b) => x + b.balance, 0));
+        return `<div class="day-head"><span>${dayName(g)}</span><span>${plural(g.bills.length, 'bill')} · ${money(t)}</span></div>
+          <div class="list">${g.bills.map(b => `<button class="hrow" data-act="openReceipt" data-id="${b.id}">
+            <span class="h-time">${fmtTime(b.completedAt)}</span>
+            <span class="h-main"><b>${esc(billName(b))}</b><small>${billLabel(b)} · total ${money(b.total)}${b.paid ? ` · paid ${money(b.paid)}` : ''}${b.wireOut ? ' · <span class="tag bundle">WIRE OUT</span>' : ''}</small></span>
+            <span class="due-amt">DUE<b>${money(b.balance)}</b></span></button>`).join('')}</div>`;
+      }).join('') : `<p class="empty">${r ? 'No unpaid bills from this period 🎉' : '🎉 Nobody owes anything'}</p>`}`;
+  } else {
+    body = groups.length ? `<div class="list">${groups.map(g => `<a class="row" href="#/statement/${encodeURIComponent(g.key)}">
+      <span class="row-main"><b>${esc(g.name)}</b><small>${plural(g.bills.length, 'bill')} · oldest ${days(g.bills[0].completedAt)}</small></span>
+      <span class="due-amt">${g.balance < 0 ? 'WE OWE' : 'DUE'}<b>${money(Math.abs(g.balance))}</b></span><span class="chev">›</span></a>`).join('')}</div>` : '<p class="empty">🎉 Nobody owes anything</p>';
+  }
   return `${topbar('Dues', '/')}
   <main class="page">
-    <section class="card ${total > 0 ? 'due-card' : ''}"><p class="due-big">Total due <b>${money(total)}</b></p><p class="hint">${plural(groups.length, 'customer')} · ${plural(unpaidBills().length, 'unpaid bill')}</p></section>
-    ${groups.length ? `<div class="list">${groups.map(g => `<a class="row" href="#/statement/${encodeURIComponent(g.key)}">
-      <span class="row-main"><b>${esc(g.name)}</b><small>${plural(g.bills.length, 'bill')} · oldest ${days(g.bills[0].completedAt)} days</small></span>
-      <span class="due-amt">${g.balance < 0 ? 'WE OWE' : 'DUE'}<b>${money(Math.abs(g.balance))}</b></span><span class="chev">›</span></a>`).join('')}</div>` : '<p class="empty">🎉 Nobody owes anything</p>'}
+    <section class="card ${total > 0 ? 'due-card' : ''}"><p class="due-big">Total due <b>${money(total)}</b></p><p class="hint">${plural(groups.length, 'customer')} · ${plural(unpaidBills().filter(b => Math.abs(b.balance) >= 0.005).length, 'unpaid bill')}</p></section>
+    ${tabs}
+    ${body}
   </main>`;
 }
 
@@ -2139,6 +2178,15 @@ const A = {
   closeSheet: () => closeSheet(),
   back(el) { goBack(el.dataset.fb || '/'); },
 
+  duesTab(el) {
+    duesView.tab = el.dataset.t;
+    local.set('duesTab', duesView.tab);
+    render(true);
+  },
+  duesPeriod(el) {
+    duesView.period = el.dataset.p;
+    render(true);
+  },
   setStart(el) {
     local.set('startPage', el.dataset.p);
     el.parentElement.querySelectorAll('button').forEach(b => b.classList.toggle('on', b === el));

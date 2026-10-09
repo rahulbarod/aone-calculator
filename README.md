@@ -1,4 +1,4 @@
-# A One Enterprise — Billing & Weight Calculator (v3.0, cloud sync)
+# A One Enterprise — Billing & Weight Calculator (v3.1, cloud sync)
 
 Offline-first PWA for counter billing. Plain HTML/CSS/JS, no build step.
 Products, customers and bills sync live between phones through Firebase (Firestore),
@@ -123,6 +123,12 @@ Tap a product, type the weight / length / quantity → total at once, using the 
 estimate; size/brand/material chosen for variant products). **＋ ADD TO ESTIMATE** builds a list with a total (scrap
 deducted) → **📤 Share** it, or **🧾 MAKE BILL** to turn it into a real bill (then choose the customer). The estimate is
 kept on that phone only.
+
+## Dues by date (v3.1)
+
+Dues → **By customer** (who owes how much) or **By date**: unpaid bills grouped by day (Today / Yesterday / date), each
+with customer, bill number, time, total, paid and amount due. Filters: All · Today · Yesterday · This week · This month;
+with a period chosen, the top shows "still due from bills made today" and "cash received today" — the end-of-day view.
 
 ## Back button
 
