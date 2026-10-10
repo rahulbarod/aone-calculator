@@ -467,3 +467,7 @@ button.tb-back { color: #fff; }
 .calc-card .qty-input { height: 72px; font-size: 36px; }
 .calc-card .qty-input.rate { font-size: 28px; }
 .calc.big-calc b { font-size: 46px; }
+
+/* bill note */
+.note-box textarea { min-height: 58px; font-size: 17px; }
+.r-remark { margin: -4px 0 10px; padding: 6px 10px; background: #f6f8fb; border-left: 4px solid var(--brand-2); font-size: 15px; white-space: pre-wrap; }

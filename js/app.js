@@ -5,7 +5,7 @@ import { scale } from './scale.js';
 import { parseProductSpeech } from './parse.js';
 import { startHindi } from './i18n.js';
 
-const APP_VERSION = '3.1.0';
+const APP_VERSION = '3.2.0';
 
 // ---------------------------------------------------------------- constants
 const UNITS = {
@@ -573,7 +573,8 @@ document.addEventListener('focusout', () => setTimeout(flushRender, 60));
 
 // ---------------------------------------------------------------- routing
 let R = { a: '', b: '', c: '' };
-let payAfterRender = null; // "Part paid": open the payment screen once the finished bill shows
+let payAfterRender = null;
+let noteTimer = null; // "Part paid": open the payment screen once the finished bill shows
 
 function go(path, replace = false) {
   const h = '#' + path;
@@ -865,6 +866,8 @@ function viewBill(bill) {
       <span class="cc-main"><small>CUSTOMER</small><b>${esc(billName(bill))}</b>${sub ? `<small>${esc(sub)}${c && c.notes ? ' · ' + esc(c.notes) : ''}</small>` : ''}</span>
       <span class="link">Change</span>
     </button>
+    <div class="note-box"><label class="lbl" for="billNote">📝 NOTE ON BILL (optional)</label>
+      <div class="search-row"><textarea id="billNote" class="input" rows="2" placeholder="e.g. 5 HP motor, deliver tomorrow">${esc(bill.remark || '')}</textarea>${micBtn('billNote')}</div></div>
     ${!bill.items.length ? '<div class="empty big">No items yet.<br>Tap <b>＋ ADD ITEM</b> below.</div>'
       : !sec.scrap.length ? `<div class="items">${sec.sales.map(itemRow).join('')}</div>`
       : `${sec.sales.length ? `<div class="sec-label">ITEMS</div><div class="items">${sec.sales.map(itemRow).join('')}
@@ -905,6 +908,7 @@ function receiptHtml(b) {
     ${s.shopPhone ? `<div class="r-sub">📞 ${esc(s.shopPhone)}</div>` : ''}
     <div class="r-meta"><span>Bill ${billLabel(b)}</span><span>${fmtDate(when)}, ${fmtTime(when)}</span></div>
     <div class="r-cust">Customer: <b>${esc(billName(b))}</b>${b.customerPhone ? ` · ${esc(b.customerPhone)}` : ''}</div>
+    ${b.remark ? `<div class="r-remark">Note: ${esc(b.remark)}</div>` : ''}
     ${(() => {
       const sec = billSections(b);
       const line = it => `<div class="r-item ${it.amount < 0 ? 'neg' : ''}"><div class="r-name">${esc(itemTitle(it))}${itemPayTag(b, it) ? ` <span class="tag ${itemPayTag(b, it) === 'PAID' ? 'paid' : 'due'}">${itemPayTag(b, it)}</span>` : ''}</div>
@@ -924,6 +928,8 @@ function receiptHtml(b) {
     <div class="r-foot">${plural(b.items.length, 'item')} · Thank you!</div>
   </article>`;
 }
+const noteBoxHtml = bill => `<div class="note-box"><label class="lbl" for="billNote">📝 NOTE ON BILL (optional)</label>
+      <div class="search-row"><textarea id="billNote" class="input" rows="2" placeholder="e.g. 5 HP motor, deliver tomorrow">${esc(bill.remark || '')}</textarea>${micBtn('billNote')}</div></div>`;
 function paymentsPanel(b) {
   if (b.status !== 'COMPLETED' || b.legacyPaid) return '';
   return `<section class="card"><h2>Payments</h2>
@@ -940,6 +946,7 @@ function receiptText(b) {
     S.shop.shopName, S.shop.shopAddress, S.shop.shopPhone && `Ph: ${S.shop.shopPhone}`,
     `Bill ${billLabel(b)} · ${fmtDate(when)} ${fmtTime(when)}`,
     `Customer: ${billName(b)}${b.customerPhone ? ' (' + b.customerPhone + ')' : ''}`,
+    b.remark && `Note: ${b.remark}`,
     '------------------------------',
     ...(() => {
       const sec = billSections(b);
@@ -963,6 +970,7 @@ function viewReceipt(bill, back) {
     ${bill.status === 'COMPLETED' ? bill.items.filter(i => i.pending && getBundle(i.bundleId)).map(i => `<a class="bundle-note" href="#/bundle/${i.bundleId}/${bill.id}">⏳ <span><b>Waiting for wire return</b><small>${esc(itemTitle(i))} · ${esc(bundleGiven(getBundle(i.bundleId)))}</small></span><span class="link">Enter return</span></a>`).join('') : ''}
     ${receiptHtml(bill)}
     ${paymentsPanel(bill)}
+    ${bill.status !== 'CANCELLED' ? `<section class="card">${noteBoxHtml(bill)}</section>` : ''}
     <div class="btn-row">
       <button class="btn-mid" data-act="shareBill" data-id="${bill.id}">📤 SHARE</button>
       <button class="btn-mid" data-act="printBill" data-id="${bill.id}">🖨 PRINT</button>
@@ -1821,6 +1829,7 @@ function settlementOps(key) {
   if (!d.bills.length) ops.push({ t: 'text', s: 'No completed bills in this period.', size: 22 });
   for (const b of d.bills) {
     ops.push({ t: 'row', l: `${fmtDate(b.completedAt)} · Bill ${billLabel(b)}`, r: fmtTime(b.completedAt), size: 23, bold: true });
+    if (b.remark) ops.push({ t: 'text', s: `   Note: ${b.remark}`, size: 19 });
     const sec = billSections(b);
     for (const it of [...sec.sales, ...sec.scrap]) {
       const tag = itemPayTag(b, it);
@@ -3023,7 +3032,7 @@ function receiptCanvas(b) {
   const P = 28;
   const c = document.createElement('canvas');
   c.width = W;
-  c.height = 900 + b.items.length * 210 + (b.payments?.length || 0) * 90;
+  c.height = 1000 + b.items.length * 210 + (b.payments?.length || 0) * 90;
   const g = c.getContext('2d');
   g.fillStyle = '#fff';
   g.fillRect(0, 0, W, c.height);
@@ -3081,6 +3090,7 @@ function receiptCanvas(b) {
   rule();
   row(`Bill ${billLabel(b)}`, `${fmtDate(when)}, ${fmtTime(when)}`, { size: 22 });
   text(`Customer: ${billName(b)}${b.customerPhone ? ' · ' + b.customerPhone : ''}`, { size: 24, bold: true });
+  if (b.remark) text(`Note: ${b.remark}`, { size: 21 });
   rule();
   const sec = billSections(b);
   const lines = list => list.forEach(it => {
@@ -3180,6 +3190,14 @@ const INPUTS = {
   custSearch: v => ($('#custResults').innerHTML = customerPickResults(v)),
   prodSearch: v => ($('#prodResults').innerHTML = productPickResults(v)),
   calcSearch: v => ($('#calcResults').innerHTML = calcResults(v)),
+  billNote: v => {
+    clearTimeout(noteTimer);
+    const id = R.b;
+    noteTimer = setTimeout(() => {
+      const b = getBill(id);
+      if (b && (b.remark || '') !== v.trim()) updateBill(b, { remark: v.trim() });
+    }, 700);
+  },
   calcQty: v => { calc.qty = v; saveCalc(); updateCalcPage(); },
   calcRate: v => { calc.rate = v; saveCalc(); updateCalcPage(); },
   custAdminSearch: v => ($('#custAdminResults').innerHTML = customerAdminResults(v)),

@@ -176,6 +176,7 @@ const PHRASES = {
   'Tap a product, then type the weight / length / quantity.': 'सामान चुनें, फिर वज़न / लंबाई / मात्रा डालें।', 'Enter the amount and rate': 'मात्रा और रेट डालें',
   '✓ Bill made — choose the customer': '✓ बिल बना — ग्राहक चुनें',
   'By customer': 'ग्राहक के हिसाब से', 'By date': 'तारीख के हिसाब से', 'All': 'सभी', 'No unpaid bills from this period 🎉': 'इस समय का कोई बकाया बिल नहीं 🎉',
+  '📝 NOTE ON BILL (optional)': '📝 बिल पर नोट (ज़रूरी नहीं)', 'e.g. 5 HP motor, deliver tomorrow': 'जैसे 5 HP मोटर, कल देना है',
   'English (India)': 'अंग्रेज़ी', 'Hindi': 'हिंदी', 'Marathi': 'मराठी', 'Gujarati': 'गुजराती', 'Punjabi': 'पंजाबी', 'Bengali': 'बांग्ला', 'Tamil': 'तमिल', 'Telugu': 'तेलुगु', 'Kannada': 'कन्नड़',
   'Connect to the internet first': 'पहले इंटरनेट चालू करें', 'Sample products already present': 'नमूना सामान पहले से है', 'All data cleared': 'सारा डेटा मिट गया',
 };
