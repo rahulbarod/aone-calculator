@@ -1,4 +1,4 @@
-# A One Enterprise — Billing & Weight Calculator (v3.3, cloud sync)
+# A One Enterprise — Billing & Weight Calculator (v3.4, cloud sync)
 
 Offline-first PWA for counter billing. Plain HTML/CSS/JS, no build step.
 Products, customers and bills sync live between phones through Firebase (Firestore),
@@ -141,6 +141,15 @@ receipt, the print image, the WhatsApp text and the settlement bill, and can be 
 Tapping **COMPLETE** without a customer first asks "Who is this bill for?" — pick a regular customer, type/speak a new
 one (one-off or ＋ save as regular), or **WALK-IN — NO NAME** — then continues to completing the bill. Wire bundles given
 before the customer was chosen get the customer's name too.
+
+## Faster billing (v3.4)
+
+- **Number pad**: weight / quantity / rate are typed on a big on-screen pad (7 8 9 … . ⌫, plus +0.1 / +0.5 / +1 or
+  −1 / +1 / +5 and C) — the phone keyboard never opens. Also on the Quick calculator and wire bundle screens.
+- **One-tap pieces**: tapping a piece item with a fixed price (Bearing, Bush…) adds 1 straight away (tap again = +1),
+  with an UNDO toast; a ×N badge shows what is already on the bill. "✎ qty" on the tile opens the number pad.
+- **Most used first**: tabs 🔥 Most used · Weight · Pieces · Scrap · Other · All. "Most used" lists the products billed
+  most in the last 30 days (favourites included); every tab and search is sorted the same way.
 
 ## Back button
 

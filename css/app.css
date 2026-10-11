@@ -472,3 +472,23 @@ button.tb-back { color: #fff; }
 .note-box textarea { min-height: 58px; font-size: 17px; }
 .r-remark { margin: -4px 0 10px; padding: 6px 10px; background: #f6f8fb; border-left: 4px solid var(--brand-2); font-size: 15px; white-space: pre-wrap; }
 .hint.b { font-weight: 800; color: var(--brand); font-size: 17px; }
+
+/* ---------- speed: number pad, one-tap tiles, tabs ---------- */
+.keypad { display: flex; flex-direction: column; gap: 6px; user-select: none; -webkit-user-select: none; }
+.kp-quick { display: grid; grid-template-columns: repeat(4, 1fr); gap: 6px; }
+.kp-keys { display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; }
+.kp { min-height: 54px; border-radius: 12px; background: #e9eef5; font-size: 26px; font-weight: 800; color: var(--ink); touch-action: manipulation; }
+.kp.q { min-height: 44px; font-size: 17px; background: #dbe6f3; color: var(--brand); }
+.kp:active { background: #c9d6e6; transform: translateY(1px); }
+.kp-field.kp-on { border-color: var(--go) !important; box-shadow: 0 0 0 4px rgba(21,128,61,.18) !important; }
+.kp-field { caret-color: transparent; cursor: pointer; }
+.ptile { position: relative; cursor: pointer; }
+.ptile.has-n { border-color: var(--go); background: #f0fdf4; }
+.pt-count { position: absolute; top: 6px; right: 8px; font-style: normal; font-weight: 900; font-size: 15px; color: #fff; background: var(--go); border-radius: 999px; padding: 1px 8px; }
+.pt-qty { align-self: flex-start; margin-top: 2px; padding: 4px 10px; border-radius: 8px; background: #fff; border: 1.5px solid var(--line); font-size: 13px; font-weight: 800; color: var(--brand-2); }
+.pick-tools { display: grid; grid-template-columns: 1.3fr 1fr 1fr; gap: 6px; }
+.pick-tools .btn-mid { min-height: 46px; font-size: 14px; padding: 0 6px; }
+.pick-tabs { margin-bottom: 6px; }
+.toast.undo-toast { pointer-events: auto; display: flex; align-items: center; gap: 14px; }
+.toast .undo { background: #fff; color: var(--ink); border-radius: 8px; padding: 6px 12px; font-weight: 900; }
+.pt-count { top: auto; bottom: 8px; }

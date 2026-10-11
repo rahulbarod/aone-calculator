@@ -5,7 +5,7 @@ import { scale } from './scale.js';
 import { parseProductSpeech } from './parse.js';
 import { startHindi } from './i18n.js';
 
-const APP_VERSION = '3.3.0';
+const APP_VERSION = '3.4.0';
 
 // ---------------------------------------------------------------- constants
 const UNITS = {
@@ -149,6 +149,19 @@ const fmtTime = iso => new Date(iso).toLocaleTimeString('en-IN', { hour: 'numeri
 const sameDay = (a, b) => new Date(a).toDateString() === new Date(b).toDateString();
 
 let toastTimer;
+// Toast with an UNDO button (one-tap adds).
+function toastUndo(msg, undo) {
+  const t = $('#toast');
+  t.innerHTML = `<span>${esc(msg)}</span><button type="button" class="undo">UNDO</button>`;
+  t.className = 'toast undo-toast';
+  t.hidden = false;
+  t.querySelector('.undo').onclick = () => {
+    t.hidden = true;
+    undo();
+  };
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => (t.hidden = true), 3500);
+}
 function toast(msg, kind = '') {
   const t = $('#toast');
   t.textContent = msg;
@@ -623,7 +636,11 @@ function render(keepScroll = false) {
   updateSyncBadge();
   if (a === 'settings') fillStorageInfo();
   if (a === 'bundle') b === 'new' ? updateBundleNew() : updateBundleReturn();
-  if (a === 'calc') updateCalcPage();
+  if (a === 'bundle' && $('.kp-field')) kpSet($('#brBack') ? 'brBack' : $('.kp-field').id);
+  if (a === 'calc') {
+    updateCalcPage();
+    if ($('#calcQty')) kpSet('calcQty');
+  }
   if (completeAfterCustomer && a === 'bill' && !c && b === completeAfterCustomer && getBill(b)?.customerChosen) {
     completeAfterCustomer = null;
     A.completeBill();
@@ -817,11 +834,12 @@ function customerPickResults(q) {
 
 // --- product picker
 function viewAddItem(bill) {
+  pickCounts = new Map();
+  bill.items.filter(i => !i.bundleId).forEach(i => pickCounts.set(i.productId, (pickCounts.get(i.productId) || 0) + i.quantity));
   return `${topbar(`Add item · ${esc(billName(bill))}`, `/bill/${bill.id}`, '', false)}
   <main class="page has-footer">
     <input id="prodSearch" class="input big" type="search" placeholder="🔍 Search product…" autocomplete="off" enterkeyhint="go">
-    <div class="btn-row"><button class="btn-mid newp" data-act="quickAdd">＋ NEW PRODUCT</button><button class="btn-mid newp" data-act="quickAddVoice">🎤 SPEAK NEW</button></div>
-    <button class="btn-mid bundle-btn" data-act="bundleInBill">🧵 GIVE WIRE BUNDLE (BS / Net)</button>
+    <div class="pick-tools"><button class="btn-mid newp" data-act="quickAdd">＋ New product</button><button class="btn-mid newp" data-act="quickAddVoice">🎤 Speak</button><button class="btn-mid bundle-btn" data-act="bundleInBill">🧵 Bundle</button></div>
     <div id="prodResults">${productPickResults('')}</div>
   </main>
   <footer class="footbar">
@@ -832,26 +850,56 @@ function viewAddItem(bill) {
     </a>
   </footer>`;
 }
+// Piece items with a fixed price are added with one tap (tap again = +1); ✎ opens the quantity screen.
+const oneTap = p => ['PCS', 'BOX'].includes(p.unit) && !p.allowDecimal && p.price > 0 && !hasVariants(p) && !asksSize(p);
 function ptile(p) {
-  return `<button class="ptile ${p.price < 0 || p.category === 'SCRAP' ? 'neg' : ''}" data-act="pickProduct" data-id="${p.id}">
+  const quick = oneTap(p);
+  const n = pickCounts.get(p.id);
+  return `<div class="ptile ${p.price < 0 || p.category === 'SCRAP' ? 'neg' : ''} ${n ? 'has-n' : ''}" role="button" tabindex="0" data-act="${quick ? 'tapProduct' : 'pickProduct'}" data-id="${p.id}">
     <span class="pt-name">${esc(p.name)}${isIncomplete(p) ? ' <i class="inc-dot" title="Details missing">!</i>' : ''}</span>
-    <span class="pt-rate">${hasVariants(p) ? `${plural(p.variants.length, 'option')} · ${variantPrices(p)}` : p.price ? rateText(p.price, p.priceType) : 'Enter rate'}</span></button>`;
+    <span class="pt-rate">${hasVariants(p) ? `${plural(p.variants.length, 'option')} · ${variantPrices(p)}` : p.price ? rateText(p.price, p.priceType) : 'Enter rate'}</span>
+    ${n ? `<i class="pt-count">×${round3(n)}${p.unit === 'KG' ? ' kg' : ''}</i>` : ''}
+    ${quick ? `<button type="button" class="pt-qty" data-act="pickProduct" data-id="${p.id}" aria-label="Quantity">✎ qty</button>` : ''}</div>`;
 }
+// How often each product was billed in the last 30 days — busiest first.
+function usageCounts() {
+  const since = new Date(Date.now() - 30 * 864e5).toISOString();
+  const m = new Map();
+  for (const b of allBills()) {
+    if (b.status === 'CANCELLED' || (b.createdAt || '') < since) continue;
+    for (const it of b.items) if (it.productId) m.set(it.productId, (m.get(it.productId) || 0) + 1);
+  }
+  return m;
+}
+const PICK_TABS = [['top', '🔥 Most used'], ['WEIGHT', 'Weight'], ['PIECE', 'Pieces'], ['SCRAP', 'Scrap'], ['OTHER', 'Other'], ['all', 'All']];
+let pickTab = local.get('pickTab', 'top');
+let pickCounts = new Map(); // quantity of each product already on the bill (badge on tiles)
 function productPickResults(q) {
   const act = S.products.filter(p => p.active);
+  const use = usageCounts();
+  const byUse = (a, b) => (use.get(b.id) || 0) - (use.get(a.id) || 0) || b.favourite - a.favourite || a.name.localeCompare(b.name);
   if (q.trim()) {
-    const m = searchProducts(act, q);
+    const s0 = q.trim().toLowerCase();
+    const m = searchProducts(act, q).sort((a, b) => b.name.toLowerCase().startsWith(s0) - a.name.toLowerCase().startsWith(s0) || byUse(a, b));
     const addNew = `<button class="btn-big alt" data-act="quickAdd" data-name="${esc(q.trim())}">＋ Add “${esc(q.trim())}” as new product</button>`;
     return m.length ? `<div class="ptiles">${m.map(ptile).join('')}</div>${addNew}` : `<p class="empty">No product matches “${esc(q)}”</p>${addNew}`;
   }
-  const byName = (a, b) => a.name.localeCompare(b.name);
-  const favs = act.filter(p => p.favourite).sort(byName);
-  let html = favs.length ? `<div class="sec-label">⭐ QUICK ITEMS</div><div class="ptiles">${favs.map(ptile).join('')}</div>` : '';
-  for (const [cat, label] of Object.entries(CATEGORIES)) {
-    const list = act.filter(p => p.category === cat).sort(byName);
-    if (list.length) html += `<div class="sec-label">${label.toUpperCase()}</div><div class="ptiles">${list.map(ptile).join('')}</div>`;
-  }
-  return html || '<p class="empty">No products yet. Add them under Products.</p>';
+  if (!act.length) return '<p class="empty">No products yet. Add them under Products.</p>';
+  const tabs = `<nav class="chips pick-tabs">${PICK_TABS.filter(([k]) => k === 'top' || k === 'all' || act.some(p => p.category === k))
+    .map(([k, v]) => `<button type="button" class="pchip ${pickTab === k ? 'on' : ''}" data-act="pickTab" data-t="${k}">${v}</button>`).join('')}</nav>`;
+  let list;
+  if (pickTab === 'top') {
+    const top = act.filter(p => use.get(p.id) || p.favourite).sort(byUse).slice(0, 12);
+    list = top.length ? top : [...act].sort(byUse).slice(0, 12);
+  } else if (pickTab === 'all') {
+    let html = '';
+    for (const [cat, label] of Object.entries(CATEGORIES)) {
+      const l = act.filter(p => p.category === cat).sort(byUse);
+      if (l.length) html += `<div class="sec-label">${label.toUpperCase()}</div><div class="ptiles">${l.map(ptile).join('')}</div>`;
+    }
+    return tabs + html;
+  } else list = act.filter(p => p.category === pickTab).sort(byUse);
+  return tabs + (list.length ? `<div class="ptiles">${list.map(ptile).join('')}</div>` : '<p class="empty">Nothing here yet</p>');
 }
 
 // --- the bill
@@ -1534,15 +1582,16 @@ function bundleFormHtml(d) {
     ${p && hasVariants(p) ? variantPicker(p, d.varSel || {}, 'bnVariant') : ''}
     ${p && asksSize(p) ? sizePicker(p, d.size, 'bnSize', 'bnSizeIn') : ''}
     <label class="lbl" for="bnOut">WEIGHT GIVEN (kg) — as shown on the scale</label>
-    <input id="bnOut" class="qty-input" inputmode="decimal" autocomplete="off" value="${esc(d.out)}" placeholder="0.000">
+    <input id="bnOut" class="qty-input kp-field" inputmode="none" autocomplete="off" value="${esc(d.out)}" placeholder="0.000">
     <label class="lbl">PACKING</label>
     <div class="seg sign">
       <button type="button" class="${d.packing === 'BS' ? 'on' : ''}" data-act="bnPacking" data-p="BS">BS — with box</button>
       <button type="button" class="${d.packing === 'NET' ? 'on' : ''}" data-act="bnPacking" data-p="NET">Net — wire only</button>
     </div>
     ${d.packing === 'BS' ? `<label class="lbl" for="bnBox">BOX WEIGHT (kg)</label>
-      <input id="bnBox" class="input big" inputmode="decimal" autocomplete="off" value="${esc(d.box)}" placeholder="0.300">
+      <input id="bnBox" class="input big kp-field" inputmode="none" autocomplete="off" value="${esc(d.box)}" placeholder="0.300">
       ${p ? `<label class="check"><input type="checkbox" id="bnSaveBox" ${d.saveBox ? 'checked' : ''}> Remember this box weight for ${esc(p.name)}</label>` : ''}` : ''}
+    ${keypadHtml(false)}
     <label class="lbl" for="bnNote">NOTE (optional)</label>
     <input id="bnNote" class="input big" autocomplete="off" value="${esc(d.note)}" placeholder="e.g. for motor rewinding">
     <div class="calc" id="bnCalc"></div>
@@ -1563,6 +1612,7 @@ function viewBundleNew() {
 }
 // From the billing screen: the customer is the bill's customer.
 function openBundleSheet(billId) {
+  setTimeout(() => $('#bnOut') && kpSet('bnOut'));
   const bill = getBill(billId);
   if (!bnDraft || bnDraft.billId !== billId) bnDraft = newBundleDraft({ billId, customerName: billName(bill) });
   openSheet(`<div class="sheet-head"><div><div class="sh-title">Give wire bundle</div><div class="sh-sub">${esc(billName(bill))} · goes on this bill, billed when returned</div></div>
@@ -1621,11 +1671,12 @@ function viewBundleReturn(id, billId) {
       <button type="button" class="${r.mode === 'all' ? 'on' : ''}" data-act="brMode" data-m="all">Used all</button>
     </div>
     ${r.mode === 'some' ? `<label class="lbl" for="brBack">WEIGHT RETURNED (kg)</label>
-      <input id="brBack" class="qty-input" inputmode="decimal" autocomplete="off" value="${esc(r.back)}" placeholder="0.000">
+      <input id="brBack" class="qty-input kp-field" inputmode="none" autocomplete="off" value="${esc(r.back)}" placeholder="0.000">
       ${bd.packing === 'BS' ? `<label class="check"><input type="checkbox" id="brWithBox" ${r.withBox ? 'checked' : ''}> Returned with the box</label>` : ''}` : ''}
     <label class="lbl" for="brRate">RATE ₹ / kg</label>
-    <input id="brRate" class="input big" inputmode="decimal" autocomplete="off" value="${esc(r.rate)}">
+    <input id="brRate" class="input big kp-field" inputmode="none" autocomplete="off" value="${esc(r.rate)}">
     <div class="calc" id="brCalc"></div>
+    ${keypadHtml(false)}
     <button type="button" class="btn-big go" id="brGo" data-act="brConfirm">ADD TO CUSTOMER'S BILL</button>
     ${billLink}
     <button type="button" class="btn-text danger" data-act="brDelete">Delete this bundle entry</button>
@@ -1672,11 +1723,12 @@ function viewCalc() {
       ${hasVariants(p) ? `<div id="calcVarBox">${variantPicker(p, calc.varSel, 'calcVariant')}</div>` : ''}
       <div class="two">
         <div><label class="lbl" for="calcQty">${qtyWord(p.unit)} (${UNITS[p.unit]?.label || ''})</label>
-          <input id="calcQty" class="qty-input" inputmode="decimal" autocomplete="off" value="${esc(calc.qty)}" placeholder="0" enterkeyhint="done"></div>
+          <input id="calcQty" class="qty-input kp-field" inputmode="none" autocomplete="off" value="${esc(calc.qty)}" placeholder="0"></div>
         <div><label class="lbl" for="calcRate">RATE ₹${PRICE_TYPES[p.priceType]?.per ? ' / ' + PRICE_TYPES[p.priceType].per : ''}</label>
-          <input id="calcRate" class="qty-input rate" inputmode="decimal" autocomplete="off" value="${esc(calc.rate)}" placeholder="0"></div>
+          <input id="calcRate" class="qty-input rate kp-field" inputmode="none" autocomplete="off" value="${esc(calc.rate)}" placeholder="0"></div>
       </div>
       <div class="calc big-calc" id="calcResult"></div>
+      ${keypadHtml(!p.allowDecimal)}
       <button type="button" class="btn-big go" id="calcAdd" data-act="calcAdd">＋ ADD TO ESTIMATE</button>
     </section>` : '<p class="hint">Tap a product, then type the weight / length / quantity.</p>'}
     ${calc.lines.length ? `<section class="card"><h2>Estimate</h2>
@@ -1690,7 +1742,8 @@ function viewCalc() {
   </main>`;
 }
 function calcResults(q) {
-  const html = productPickResults(q).replace(/data-act="pickProduct"/g, 'data-act="calcPick"');
+  pickCounts = new Map();
+  const html = productPickResults(q).replace(/<button type="button" class="pt-qty"[^>]*>[^<]*<\/button>/g, '').replace(/data-act="(pickProduct|tapProduct)"/g, 'data-act="calcPick"');
   return html.replace(/<button class="btn-big alt" data-act="quickAdd"[^]*?<\/button>/g, '');
 }
 function updateCalcPage() {
@@ -2049,6 +2102,25 @@ function confirmBox({ title, body = '', ok = 'YES', cancel = 'NO', alt = null, m
   });
 }
 
+// --- on-screen number pad: weights and quantities without the phone keyboard
+let kpTarget = null;
+let kpFresh = true; // first key replaces what is in the box
+function keypadHtml(whole = false) {
+  const quick = whole ? [['−1', '-1'], ['+1', '+1'], ['+5', '+5'], ['C', 'C']] : [['+0.1', '+0.1'], ['+0.5', '+0.5'], ['+1', '+1'], ['C', 'C']];
+  const keys = ['7', '8', '9', '4', '5', '6', '1', '2', '3', whole ? '00' : '.', '0', '⌫'];
+  return `<div class="keypad"><div class="kp-quick">${quick.map(([l, k]) => `<button type="button" class="kp q" data-act="kp" data-k="${k}">${l}</button>`).join('')}</div>
+    <div class="kp-keys">${keys.map(k => `<button type="button" class="kp" data-act="kp" data-k="${k}">${k}</button>`).join('')}</div></div>`;
+}
+function kpSet(id) {
+  kpTarget = id;
+  kpFresh = true;
+  document.querySelectorAll('.kp-field').forEach(e => e.classList.toggle('kp-on', e.id === id));
+}
+document.addEventListener('focusin', e => {
+  if (e.target.classList?.contains('kp-field') && kpTarget !== e.target.id) kpSet(e.target.id);
+});
+document.addEventListener('mousedown', e => { if (e.target.closest('[data-act="kp"]')) e.preventDefault(); });
+
 // --- quantity / weight entry
 function openQtySheet(billId, productId, itemId = null, presetQty = null) {
   const bill = getBill(billId);
@@ -2080,7 +2152,7 @@ function openQtySheet(billId, productId, itemId = null, presetQty = null) {
     </div>
     <div id="rateBox" class="rate-box" ${needRate ? '' : 'hidden'}>
       <label class="lbl" for="rateIn">RATE ₹${per ? ' / ' + per : ''}${neg ? ' (deducted from bill)' : ''}</label>
-      <input id="rateIn" class="input big" inputmode="decimal" autocomplete="off" value="${src.rate ? Math.abs(src.rate) : ''}" placeholder="0">
+      <input id="rateIn" class="input big kp-field" inputmode="none" autocomplete="off" value="${src.rate ? Math.abs(src.rate) : ''}" placeholder="0">
       <small class="hint">For this bill only — catalogue price stays the same.</small>
     </div>
     ${varP ? `<div id="varBox">${variantPicker(varP, varSel, 'pickVariant')}</div>` : ''}
@@ -2088,19 +2160,17 @@ function openQtySheet(billId, productId, itemId = null, presetQty = null) {
     ${sheetCtx.askSize ? sizePicker(prod, sheetCtx.size, 'pickSize', 'sizeIn') : ''}
     <label class="lbl" for="qtyIn">${qtyWord(src.unit)} (${u})</label>
     <div class="qty-row">
-      ${src.allowDecimal ? '' : '<button type="button" class="step" data-act="step" data-d="-1">−</button>'}
-      <input id="qtyIn" class="qty-input" inputmode="${src.allowDecimal ? 'decimal' : 'numeric'}" autocomplete="off" value="${startQty}" placeholder="0">
-      ${src.allowDecimal ? `<span class="qty-unit">${u}</span>` : '<button type="button" class="step" data-act="step" data-d="1">＋</button>'}
+      <input id="qtyIn" class="qty-input kp-field" inputmode="none" autocomplete="off" value="${startQty}" placeholder="0">
+      <span class="qty-unit">${u}</span>
     </div>
     ${scale.available && (src.unit === 'KG' || src.unit === 'GRAM') ? '<button type="button" class="btn-mid" data-act="readScale">⚖ Read from scale</button>' : ''}
     <div class="calc ${neg ? 'neg' : ''}" id="calcOut"></div>
+    ${keypadHtml(!src.allowDecimal)}
     <button type="button" class="btn-big go" id="qtyGo" data-act="confirmQty">${item ? 'UPDATE' : 'ADD'}</button>
     ${item ? '<button type="button" class="btn-text danger" data-act="removeItem">Remove this item</button>' : ''}
   `);
   updateCalc();
-  const f = needRate ? $('#rateIn') : $('#qtyIn');
-  f.focus();
-  f.select();
+  kpSet(needRate ? 'rateIn' : 'qtyIn');
 }
 function currentRate() {
   const v = num($('#rateIn')?.value);
@@ -2214,7 +2284,6 @@ const A = {
     calc.rate = String(Math.abs(calc.variant ? calc.variant.price : p.price) || '');
     saveCalc();
     render();
-    $('#calcQty')?.focus();
   },
   calcVariant(el) {
     const p = getProduct(calc.productId);
@@ -2239,7 +2308,6 @@ const A = {
     saveCalc();
     toast(`✓ ${l.label}  ${money(l.amount)}`);
     render(true);
-    $('#calcQty')?.focus();
   },
   calcDel(el) {
     calc.lines.splice(Number(el.dataset.i), 1);
@@ -2597,6 +2665,69 @@ const A = {
 
   // --- items
   pickProduct(el) { openQtySheet(R.b, el.dataset.id); },
+  kp(el) {
+    const i = kpTarget && document.getElementById(kpTarget);
+    if (!i) return;
+    const k = el.dataset.k;
+    let v = i.value;
+    if (k === 'C') v = '';
+    else if (k === '⌫') v = kpFresh ? '' : v.slice(0, -1);
+    else if (/^[+-]\d/.test(k)) v = String(round3(Math.max(0, (num(v) || 0) + Number(k))));
+    else {
+      if (kpFresh) v = '';
+      if (k === '.' && v.includes('.')) return;
+      v = (v === '0' && k !== '.' ? '' : v) + k;
+      if (v.startsWith('.')) v = '0' + v;
+    }
+    kpFresh = false;
+    i.value = v;
+    i.dispatchEvent(new Event('input', { bubbles: true }));
+  },
+  pickTab(el) {
+    pickTab = el.dataset.t;
+    local.set('pickTab', pickTab);
+    if ($('#calcResults')) $('#calcResults').innerHTML = calcResults('');
+    else if ($('#prodResults')) $('#prodResults').innerHTML = productPickResults('');
+  },
+  // One tap = one piece (tap again for another), with UNDO.
+  tapProduct(el) {
+    const bill = getBill(R.b);
+    const p = getProduct(el.dataset.id);
+    if (!bill || !p) return;
+    const same = bill.items.find(i => i.productId === p.id && !i.bundleId && !i.variant && !i.size && i.rate === p.price);
+    let undo;
+    if (same) {
+      const prev = same.quantity;
+      putBillItem(bill, { ...same, quantity: prev + 1, amount: lineAmount(prev + 1, same.rate, same.unit, same.priceType) });
+      undo = () => {
+        const b = getBill(bill.id);
+        const cur = b?.items.find(i => i.id === same.id);
+        if (cur) putBillItem(b, { ...cur, quantity: prev, amount: lineAmount(prev, cur.rate, cur.unit, cur.priceType) });
+      };
+    } else {
+      const item = {
+        id: uid(), billId: bill.id, productId: p.id, productName: p.name, category: p.category, unit: p.unit, priceType: p.priceType,
+        allowDecimal: p.allowDecimal, quantity: 1, rate: p.price, amount: lineAmount(1, p.price, p.unit, p.priceType), isNegative: p.price < 0,
+        addedAt: now(), addedBy: S.user.email,
+      };
+      putBillItem(bill, item, bill.status === 'DRAFT' ? { status: 'ACTIVE' } : {});
+      undo = () => dropBillItem(getBill(bill.id), item.id);
+    }
+    const n = same ? same.quantity + 1 : 1;
+    const q = $('#prodSearch')?.value || '';
+    const keep = () => {
+      render(true);
+      if (q && $('#prodSearch')) {
+        $('#prodSearch').value = q;
+        INPUTS.prodSearch(q);
+      }
+    };
+    keep();
+    toastUndo(`✓ ${p.name} ×${n}  ${money(lineAmount(n, p.price, p.unit, p.priceType))}`, () => {
+      undo();
+      keep();
+    });
+  },
   editItem(el) {
     const it = getBill(R.b)?.items.find(i => i.id === el.dataset.id);
     if (it?.bundleId && getBundle(it.bundleId)) return go(`/bundle/${it.bundleId}/${R.b}`);
@@ -2604,8 +2735,7 @@ const A = {
   },
   toggleRate() {
     $('#rateBox').hidden = false;
-    $('#rateIn').focus();
-    $('#rateIn').select();
+    kpSet('rateIn');
   },
   step(el) {
     const i = $('#qtyIn');
@@ -3256,9 +3386,11 @@ const ENTER = {
   ooName: () => $('#ooPhone').focus(),
   ooPhone: () => A.confirmOneOff(),
   emuEmail: () => A.emuSignIn(),
-  prodSearch: () => $('#prodResults [data-act="pickProduct"]')?.click(),
+  prodSearch: () => $('#prodResults .ptile')?.click(),
   calcSearch: () => $('#calcResults [data-act="calcPick"]')?.click(),
   calcQty: () => A.calcAdd(),
+  bnOut: () => A.bnGive(),
+  brBack: () => A.brConfirm(),
   calcRate: () => A.calcAdd(),
   custSearch: () => $('#custResults [data-act]')?.click(),
 };

@@ -179,6 +179,8 @@ const PHRASES = {
   '📝 NOTE ON BILL (optional)': '📝 बिल पर नोट (ज़रूरी नहीं)', 'e.g. 5 HP motor, deliver tomorrow': 'जैसे 5 HP मोटर, कल देना है',
   'WALK-IN — NO NAME': 'राह चलता — बिना नाम', '＋ Add customer': '＋ ग्राहक जोड़ें',
   'Tap to choose — or choose when completing': 'अभी चुनें — या बिल पूरा करते समय',
+  '🔥 Most used': '🔥 सबसे ज़्यादा', 'Weight': 'वज़न', 'Pieces': 'नग', '✎ qty': '✎ मात्रा', 'UNDO': 'वापस लें',
+  '＋ New product': '＋ नया सामान', '🎤 Speak': '🎤 बोलें', '🧵 Bundle': '🧵 बंडल', 'Nothing here yet': 'अभी यहाँ कुछ नहीं', 'Quantity': 'मात्रा',
   'English (India)': 'अंग्रेज़ी', 'Hindi': 'हिंदी', 'Marathi': 'मराठी', 'Gujarati': 'गुजराती', 'Punjabi': 'पंजाबी', 'Bengali': 'बांग्ला', 'Tamil': 'तमिल', 'Telugu': 'तेलुगु', 'Kannada': 'कन्नड़',
   'Connect to the internet first': 'पहले इंटरनेट चालू करें', 'Sample products already present': 'नमूना सामान पहले से है', 'All data cleared': 'सारा डेटा मिट गया',
 };
