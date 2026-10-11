@@ -1,4 +1,4 @@
-# A One Enterprise — Billing & Weight Calculator (v3.2, cloud sync)
+# A One Enterprise — Billing & Weight Calculator (v3.3, cloud sync)
 
 Offline-first PWA for counter billing. Plain HTML/CSS/JS, no build step.
 Products, customers and bills sync live between phones through Firebase (Firestore),
@@ -134,6 +134,13 @@ with a period chosen, the top shows "still due from bills made today" and "cash 
 
 Every bill has a **📝 Note on bill** box under the customer (type or 🎤 speak; saves automatically). It is printed on the
 receipt, the print image, the WhatsApp text and the settlement bill, and can be changed later from the completed bill.
+
+## Customer last (v3.3)
+
+**＋ ADD TO BILL** opens the products straight away. The customer card on the bill says "＋ Add customer" (tap any time).
+Tapping **COMPLETE** without a customer first asks "Who is this bill for?" — pick a regular customer, type/speak a new
+one (one-off or ＋ save as regular), or **WALK-IN — NO NAME** — then continues to completing the bill. Wire bundles given
+before the customer was chosen get the customer's name too.
 
 ## Back button
 

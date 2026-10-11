@@ -5,7 +5,7 @@ import { scale } from './scale.js';
 import { parseProductSpeech } from './parse.js';
 import { startHindi } from './i18n.js';
 
-const APP_VERSION = '3.2.0';
+const APP_VERSION = '3.3.0';
 
 // ---------------------------------------------------------------- constants
 const UNITS = {
@@ -574,6 +574,7 @@ document.addEventListener('focusout', () => setTimeout(flushRender, 60));
 // ---------------------------------------------------------------- routing
 let R = { a: '', b: '', c: '' };
 let payAfterRender = null;
+let completeAfterCustomer = null; // COMPLETE tapped before a customer was chosen
 let noteTimer = null; // "Part paid": open the payment screen once the finished bill shows
 
 function go(path, replace = false) {
@@ -623,6 +624,10 @@ function render(keepScroll = false) {
   if (a === 'settings') fillStorageInfo();
   if (a === 'bundle') b === 'new' ? updateBundleNew() : updateBundleReturn();
   if (a === 'calc') updateCalcPage();
+  if (completeAfterCustomer && a === 'bill' && !c && b === completeAfterCustomer && getBill(b)?.customerChosen) {
+    completeAfterCustomer = null;
+    A.completeBill();
+  }
   if (payAfterRender && a === 'done' && b === payAfterRender) {
     payAfterRender = null;
     A.payBill({ dataset: { id: b } });
@@ -642,7 +647,6 @@ function route(a, b, c) {
         return go('/', true);
       }
       if (c === 'customer') return viewCustomerPick(bill);
-      if (!bill.customerChosen) return go(`/bill/${b}/customer`, true);
       if (c === 'add') return viewAddItem(bill);
       return viewBill(bill);
     }
@@ -786,13 +790,15 @@ function viewActiveBills() {
 // --- customer selection for a bill
 function viewCustomerPick(bill) {
   const back = bill.customerChosen || bill.items.length ? `/bill/${bill.id}` : '/';
+  const finishing = completeAfterCustomer === bill.id;
   return `${topbar(`Bill ${billLabel(bill)} · Customer`, back, '', false)}
   <main class="page">
+    ${finishing ? `<p class="hint b">Who is this bill for? · ${money(bill.total)}</p>` : ''}
     <div class="search-row">
       <input id="custSearch" class="input big" type="search" placeholder="Type or 🎤 speak name" autocomplete="off" enterkeyhint="search">
       ${micBtn('custSearch')}
     </div>
-    <button class="btn-big alt" data-act="oneOff">ONE-OFF CUSTOMER</button>
+    <div class="btn-row"><button class="btn-mid" data-act="oneOff">ONE-OFF CUSTOMER</button><button class="btn-mid" data-act="walkIn">WALK-IN — NO NAME</button></div>
     <div id="custResults" class="list">${customerPickResults('')}</div>
   </main>`;
 }
@@ -853,7 +859,7 @@ function viewBill(bill) {
   const act = activeBills();
   const sec = billSections(bill);
   const c = bill.customerId ? getCustomer(bill.customerId) : null;
-  const sub = [bill.customerPhone, bill.customerType === 'REGULAR' ? 'Regular' : 'One-off'].filter(Boolean).join(' · ');
+  const sub = bill.customerChosen ? [bill.customerPhone, bill.customerType === 'REGULAR' ? 'Regular' : 'One-off'].filter(Boolean).join(' · ') : 'Tap to choose — or choose when completing';
   return `${topbar(`Bill ${billLabel(bill)}`, '/', `<span class="status">${bill.status}</span>`, false)}
   <nav class="switcher">
     ${act.map(b => `<button class="chip ${b.id === bill.id ? 'on' : ''}" data-act="openBill" data-id="${b.id}"><b>${esc(billName(b))}</b><small>${money(b.total)}</small></button>`).join('')}
@@ -863,7 +869,7 @@ function viewBill(bill) {
     ${bill.customerChosen ? openBundles().filter(bd => custKey(bd) === custKey(bill) && bd.billId !== bill.id).map(bd => `<a class="bundle-note" href="#/bundle/${bd.id}/${bill.id}">🧵 <span><b>${esc(bundleTitle(bd))} bundle out</b><small>${kg(bd.outWeight)} kg ${bd.packing === 'BS' ? 'BS' : 'Net'} · given ${fmtDate(bd.outAt)}</small></span><span class="link">Return &amp; bill</span></a>`).join('') : ''}
     <button class="cust-card" data-act="changeCustomer">
       <span class="cc-ico">👤</span>
-      <span class="cc-main"><small>CUSTOMER</small><b>${esc(billName(bill))}</b>${sub ? `<small>${esc(sub)}${c && c.notes ? ' · ' + esc(c.notes) : ''}</small>` : ''}</span>
+      <span class="cc-main"><small>CUSTOMER</small><b>${bill.customerChosen ? esc(billName(bill)) : '＋ Add customer'}</b>${sub ? `<small>${esc(sub)}${c && c.notes ? ' · ' + esc(c.notes) : ''}</small>` : ''}</span>
       <span class="link">Change</span>
     </button>
     <div class="note-box"><label class="lbl" for="billNote">📝 NOTE ON BILL (optional)</label>
@@ -2260,7 +2266,7 @@ const A = {
     calc.lines = [];
     saveCalc();
     toast('✓ Bill made — choose the customer');
-    go(`/bill/${bill.id}/customer`);
+    go(`/bill/${bill.id}`);
   },
   setLang(el) {
     if (local.get('lang', 'en') === el.dataset.l) return;
@@ -2290,13 +2296,14 @@ const A = {
     await cloud.signOut();
   },
 
+  // A new bill starts straight on the products; the customer can be chosen any time, or at COMPLETE.
   newBill() {
     const b = createBill();
-    go(`/bill/${b.id}/customer`);
+    go(`/bill/${b.id}/add`);
   },
   openBill(el) {
     const b = getBill(el.dataset.id);
-    if (b) go(!isOpenBill(b) ? `/receipt/${b.id}` : b.customerChosen ? `/bill/${b.id}` : `/bill/${b.id}/customer`);
+    if (b) go(!isOpenBill(b) ? `/receipt/${b.id}` : b.items.length || b.customerChosen ? `/bill/${b.id}` : `/bill/${b.id}/add`);
   },
   openReceipt(el) { go(`/receipt/${el.dataset.id}`); },
   changeCustomer() { go(`/bill/${R.b}/customer`); },
@@ -2335,6 +2342,7 @@ const A = {
     const c = saveCustomer({ name: $('#custSearch').value.trim() });
     setBillCustomer({ id: c.id, name: c.name, phone: '', type: 'REGULAR' });
   },
+  walkIn() { setBillCustomer({ id: null, name: '', phone: '', type: 'ONE_OFF' }); },
   oneOff() {
     const pre = $('#custSearch')?.value.trim() || '';
     openSheet(`
@@ -2666,6 +2674,10 @@ const A = {
   async completeBill() {
     let bill = getBill(R.b);
     if (!bill.items.length) return toast('Add at least one item first', 'err');
+    if (!bill.customerChosen) {
+      completeAfterCustomer = bill.id;
+      return go(`/bill/${bill.id}/customer`);
+    }
     const out = bill.total < 0;
     const amt = (out ? `Pay to customer <b>${money(Math.abs(bill.total))}</b>` : `Total <b>${money(bill.total)}</b>`)
       + (bill.payments?.length ? `<br>Paid earlier <b>${money(bill.paid)}</b> · Balance <b>${money(bill.balance)}</b>` : '');
@@ -3172,7 +3184,13 @@ async function shareText(title, text) {
 
 function setBillCustomer({ id, name, phone, type }) {
   const bill = getBill(R.b);
-  updateBill(bill, { customerChosen: true, customerId: id, customerName: name, customerPhone: phone || '', customerType: type });
+  const who = { customerId: id, customerName: name, customerPhone: phone || '' };
+  updateBill(bill, { customerChosen: true, ...who, customerType: type });
+  // Wire bundles given before the customer was chosen get the name too.
+  S.bundles.filter(bd => bd.billId === bill.id).forEach(bd => {
+    Object.assign(bd, who);
+    cloud.update('bundles', bd.id, { ...who, updatedAt: now() });
+  });
   go(bill.items.length ? `/bill/${bill.id}` : `/bill/${bill.id}/add`, true);
 }
 
